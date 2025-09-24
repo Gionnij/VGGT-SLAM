@@ -11,6 +11,11 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
+from sensor_msgs.msg import CameraInfo
+
+def _f(x):  # ensure native Python float (not numpy.float32/64)
+    return float(x)
+
 def make_camera_info(w, h, fx=None, fy=None, cx=None, cy=None):
     # Simple pinhole intrinsics (good enough for testing)
     if fx is None or fy is None:
@@ -18,15 +23,19 @@ def make_camera_info(w, h, fx=None, fy=None, cx=None, cy=None):
     if cx is None or cy is None:
         cx = w / 2.0
         cy = h / 2.0
-    K = [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-    P = [fx, 0,  cx, 0,
-         0,  fy, cy, 0,
-         0,  0,   1, 0]
+
+    K = [_f(fx), _f(0),   _f(cx),
+         _f(0),  _f(fy),  _f(cy),
+         _f(0),  _f(0),   _f(1)]
+    P = [_f(fx), _f(0),   _f(cx), _f(0),
+         _f(0),  _f(fy),  _f(cy), _f(0),
+         _f(0),  _f(0),   _f(1),  _f(0)]
+
     msg = CameraInfo()
-    msg.width = w
-    msg.height = h
-    msg.k = K
-    msg.p = P
+    msg.width = int(w)
+    msg.height = int(h)
+    msg.k = K              # length 9, all Python floats ✅
+    msg.p = P              # length 12, all Python floats ✅
     msg.d = []
     msg.distortion_model = "plumb_bob"
     return msg
