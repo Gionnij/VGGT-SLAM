@@ -1,14 +1,16 @@
+#!/usr/bin/env python3
 import os
 import glob
 import argparse
 import time
+import signal
 import threading
 import tempfile
 import shutil
 from collections import deque
 from queue import Queue, Empty
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 import numpy as np
 import torch
@@ -18,31 +20,33 @@ import matplotlib.pyplot as plt
 
 import vggt_slam.slam_utils as utils
 from vggt_slam.solver import Solver
-
 from vggt.models.vggt import VGGT
 
-# --- Optional ROS 2 imports (guarded) ---
+# ---------- Optional ROS 2 imports (guarded) ----------
+ROS_AVAILABLE = False
 try:
     import rclpy
     from rclpy.node import Node
     from sensor_msgs.msg import Image, CameraInfo
     from cv_bridge import CvBridge
+    from std_msgs.msg import Empty  # for /stream/stop
     ROS_AVAILABLE = True
 except Exception:
-    ROS_AVAILABLE = False
+    pass
 
 
+# ----------------- Data structures --------------------
 @dataclass
 class Frame:
-    img: np.ndarray           # HxWx3 uint8 (BGR as from cv_bridge) or RGB
+    img: np.ndarray           # HxWx3 uint8 (BGR from cv_bridge)
     ts: float                 # seconds (float)
     seq: int                  # monotonic increasing
     K: np.ndarray             # 3x3 intrinsics
 
 
+# ----------------- Utilities -------------------------
 def resize_to_approx_2mp(img: np.ndarray, long_side_cap: int = 1920) -> np.ndarray:
-    """Resize keeping aspect ratio so that the long side <= long_side_cap (~2MP at 1920x1080).
-    Assumes img is HxWxC. Returns resized image (uint8)."""
+    """Resize keeping aspect ratio so that the long side <= long_side_cap (~2MP at 1920x1080)."""
     h, w = img.shape[:2]
     long_side = max(h, w)
     if long_side <= long_side_cap:
@@ -53,9 +57,19 @@ def resize_to_approx_2mp(img: np.ndarray, long_side_cap: int = 1920) -> np.ndarr
     return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
+# ----------------- ROS 2 Ingest -----------------------
 class Ros2Ingest:
-    """ROS 2 subscriber that feeds a bounded Queue[Frame]."""
-    def __init__(self, topic_image: str, topic_info: str, out_queue: Queue, frame_id_start: int = 0, bgr_to_rgb: bool = True):
+    """
+    ROS 2 subscriber that feeds a bounded Queue[Frame].
+    Also listens to /stream/stop (std_msgs/Empty) and sets a stop_event.
+    """
+    def __init__(self,
+                 topic_image: str,
+                 topic_info: str,
+                 out_queue: Queue,
+                 frame_id_start: int = 0,
+                 bgr_to_rgb: bool = False,
+                 stop_event: Optional[threading.Event] = None):
         if not ROS_AVAILABLE:
             raise RuntimeError("ROS 2 not available. Please install rclpy, sensor_msgs, cv_bridge.")
         self._queue = out_queue
@@ -64,6 +78,7 @@ class Ros2Ingest:
         self._seq = frame_id_start
         self._bridge = CvBridge()
         self._bgr_to_rgb = bgr_to_rgb
+        self._stop_event = stop_event
 
         rclpy.init(args=None)
         self.node = Node('vggt_slam_live_ingest')
@@ -71,6 +86,7 @@ class Ros2Ingest:
 
         self._sub_info = self.node.create_subscription(CameraInfo, self._topic_info, self._on_info, 10)
         self._sub_img = self.node.create_subscription(Image, self._topic_image, self._on_image, 10)
+        self._sub_stop = self.node.create_subscription(Empty, '/stream/stop', self._on_stop, 10)
 
         self._executor_thread = threading.Thread(target=self._spin, daemon=True)
 
@@ -90,8 +106,12 @@ class Ros2Ingest:
     def _spin(self):
         rclpy.spin(self.node)
 
+    def _on_stop(self, _: Empty):
+        if self._stop_event is not None:
+            self.node.get_logger().info("Received /stream/stop; stopping ingest…")
+            self._stop_event.set()
+
     def _on_info(self, msg: CameraInfo):
-        # Build intrinsic matrix K
         try:
             K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
             self._K = K
@@ -105,9 +125,9 @@ class Ros2Ingest:
             cv_img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception:
             return
+
         if self._bgr_to_rgb:
-            # VGGT typically expects RGB; downstream we stay consistent by writing with cv2 (BGR)
-            pass  # keep BGR here; convert at write-time if needed
+            cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
 
         # Resize to ~2 MP
         cv_img = resize_to_approx_2mp(cv_img, long_side_cap=1920)
@@ -117,23 +137,20 @@ class Ros2Ingest:
         self._seq += 1
 
         frame = Frame(img=cv_img, ts=ts, seq=seq, K=self._K.copy())
-
-        # Bounded put with tiny timeout to avoid blocking the ROS callback indefinitely
+        # Best-effort non-blocking put; short blocking fallback
         try:
             self._queue.put(frame, block=False)
         except Exception:
-            # Queue full: we intentionally do NOT drop here to honor decimation-on-consumer policy.
-            # As a compromise, try a short blocking put to let consumer catch up; otherwise drop this one.
             try:
                 self._queue.put(frame, block=True, timeout=0.01)
             except Exception:
-                # Drop as last resort; consumer will also decimate when pressured.
+                # Drop as last resort; consumer also decimates on pressure
                 pass
 
 
-# --- Argument parser ---
+# ----------------- Args -------------------------------
 parser = argparse.ArgumentParser(description="VGGT-SLAM live/offline")
-# Existing args from the original script
+# Original args
 parser.add_argument("--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images")
 parser.add_argument("--vis_map", action="store_true", help="Visualize point cloud in viser as it is being build, otherwise only show the final map")
 parser.add_argument("--vis_flow", action="store_true", help="Visualize optical flow from RAFT for keyframe selection")
@@ -151,8 +168,7 @@ parser.add_argument("--use_point_map", action="store_true", help="Use point map 
 parser.add_argument("--conf_threshold", type=float, default=25.0, help="Initial percentage of low-confidence points to filter out")
 parser.add_argument("--vis_stride", type=int, default=1, help="Stride interval in the 3D point cloud image for visualization. Try increasing (such as 4) to reduce lag in visualizing large maps.")
 parser.add_argument("--vis_point_size", type=float, default=0.003, help="Visualization point size")
-
-# New live-stream args
+# Live-stream args
 parser.add_argument("--live", action="store_true", help="Enable live streaming mode via ROS 2")
 parser.add_argument("--ros_image_topic", type=str, default="/camera/image_color", help="ROS 2 image topic")
 parser.add_argument("--ros_info_topic", type=str, default="/camera/camera_info", help="ROS 2 CameraInfo topic")
@@ -162,35 +178,44 @@ parser.add_argument("--window_size", type=int, default=15, help="Sliding window 
 parser.add_argument("--decimate_floor", type=int, default=1, help="Minimum decimation stride (>=1)")
 parser.add_argument("--max_latency_s", type=float, default=1.0, help="Max acceptable staleness of a frame (s)")
 parser.add_argument("--temp_dir", type=str, default="", help="Optional directory to buffer live frames as images (falls back to tmp or /dev/shm)")
+parser.add_argument("--local_model", type=str, default=os.path.expanduser("~/models/VGGT-1B/model.pt"),
+                    help="Path to local VGGT weights to avoid internet download")
 
 
+# ----------------- Temp writer shim -------------------
 def write_window_to_temp(paths_dir: str, frames: List[Frame], to_rgb: bool = False) -> List[str]:
-    """Write frames to disk and return list of file paths in the same order.
-    Uses JPEG with high quality to reduce CPU time and I/O size. """
+    """Write frames to disk and return list of file paths in the same order (JPEG q=90)."""
     os.makedirs(paths_dir, exist_ok=True)
     file_paths = []
     for f in frames:
-        # Encode as BGR for cv2.imencode. If imgs are BGR (from cv_bridge), we can write directly.
         img = f.img
         if to_rgb:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         fname = f"seq_{f.seq:08d}_ts_{f.ts:.6f}.jpg"
         path = os.path.join(paths_dir, fname)
-        # Use imwrite (fast path) with JPEG quality 90
         cv2.imwrite(path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         file_paths.append(path)
     return file_paths
 
 
+# ----------------- Live loop --------------------------
 def live_loop(args, solver: Solver, model: VGGT, device: str):
     if not ROS_AVAILABLE:
         raise RuntimeError("--live was set but ROS 2 is not available. Install rclpy, sensor_msgs, cv_bridge.")
 
+    stop_event = threading.Event()
+
+    # Handle Ctrl-C / SIGTERM too
+    def _sig_handler(sig, _):
+        print(f"[LIVE] Received signal {sig}; stopping…")
+        stop_event.set()
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
     frame_queue: Queue = Queue(maxsize=args.ros2_queue_size)
-    ros = Ros2Ingest(args.ros_image_topic, args.ros_info_topic, frame_queue)
+    ros = Ros2Ingest(args.ros_image_topic, args.ros_info_topic, frame_queue, stop_event=stop_event)
     ros.start()
 
-    # Temporary directory for frame shims (so solver.run_predictions can stay path-based)
     base_tmp = args.temp_dir if args.temp_dir else ("/dev/shm" if os.path.exists("/dev/shm") else tempfile.gettempdir())
     tmp_dir = tempfile.mkdtemp(prefix="vggt_live_", dir=base_tmp)
 
@@ -203,14 +228,16 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
 
     try:
         while True:
+            if stop_event.is_set():
+                break
+
             try:
                 frame: Frame = frame_queue.get(timeout=0.05)
             except Empty:
                 continue
 
-            # Optional latency guard using wall clock (as ROS time may not be comparable to wall time)
+            # Optional latency guard using wall time (assumes clocks are roughly synced)
             if (time.time() - frame.ts) > args.max_latency_s:
-                # too stale; skip (rare if clocks are synced)
                 continue
 
             # Backpressure → adjust decimation based on queue fill level
@@ -228,7 +255,7 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
 
             window.append(frame)
 
-            # Pace by target FPS using wall time
+            # Pace by target FPS
             now = time.time()
             if (now - last_proc_wall) < (1.0 / max(1e-6, args.target_fps)):
                 continue
@@ -237,8 +264,7 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
             if len(window) < need:
                 continue
 
-            # Convert window frames to image paths via temp files
-            # (No need to write K per-frame here; if your solver needs intrinsics, extend the API.)
+            # Convert window frames to image paths via temp files (keeps solver API unchanged)
             subdir = os.path.join(tmp_dir, f"batch_{window[0].seq:08d}")
             img_paths = write_window_to_temp(subdir, list(window))
 
@@ -263,7 +289,7 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
             last_proc_wall = now
 
     except KeyboardInterrupt:
-        print("[LIVE] Interrupted by user. Shutting down...")
+        print("[LIVE] Interrupted by user. Shutting down…")
     finally:
         ros.shutdown()
         try:
@@ -272,12 +298,14 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
             pass
 
 
+# ----------------- Offline loop (unchanged) -----------
 def offline_loop(args, solver: Solver, model: VGGT, device: str):
     use_optical_flow_downsample = True
 
     print(f"Loading images from {args.image_folder}...")
     image_names = [f for f in glob.glob(os.path.join(args.image_folder, "*"))
-                   if "depth" not in os.path.basename(f).lower() and "txt" not in os.path.basename(f).lower()
+                   if "depth" not in os.path.basename(f).lower()
+                   and "txt" not in os.path.basename(f).lower()
                    and "db" not in os.path.basename(f).lower()]
 
     image_names = utils.sort_images_by_number(image_names)
@@ -303,7 +331,6 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str):
             data.append(predictions["intrinsic"][:, 0, 0])
 
             solver.add_points(predictions)
-
             solver.graph.optimize()
             solver.map.update_submap_homographies(solver.graph)
 
@@ -321,32 +348,24 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str):
     print("Total number of loop closures in map", solver.graph.get_num_loops())
 
     if not args.vis_map:
-        # just show the map after all submaps have been processed
         solver.update_all_submap_vis()
 
     if args.log_results:
         solver.map.write_poses_to_file(args.log_path)
-
         if not args.skip_dense_log:
-            # Log the dense point cloud for each submap.
             solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
 
     if args.plot_focal_lengths:
-        # Define a colormap
         colors = plt.cm.viridis(np.linspace(0, 1, len(data)))
-        # Create the scatter plot
         plt.figure(figsize=(8, 6))
         for i, values in enumerate(data):
-            y = values  # Y-values from the list
-            x = [i] * len(values)  # X-values (same for all points in the list)
+            y = values
+            x = [i] * len(values)
             plt.scatter(x, y, color=colors[i], label=f'List {i+1}')
-
-        plt.xlabel("poses")
-        plt.ylabel("Focal lengths")
-        plt.grid()
-        plt.show()
+        plt.xlabel("poses"); plt.ylabel("Focal lengths"); plt.grid(); plt.show()
 
 
+# ----------------- Main -------------------------------
 def main():
     args = parser.parse_args()
 
@@ -363,10 +382,18 @@ def main():
     )
 
     print("Initializing and loading VGGT model...")
-
     model = VGGT()
-    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+
+    # Prefer local weights if available (GPU nodes without internet)
+    state = None
+    if args.local_model and os.path.exists(args.local_model):
+        print(f"Loading VGGT weights from local path: {args.local_model}")
+        state = torch.load(args.local_model, map_location="cpu")
+    else:
+        print("Local model not found; attempting to download (requires internet)…")
+        _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+        state = torch.hub.load_state_dict_from_url(_URL)
+    model.load_state_dict(state)
 
     model.eval()
     model = model.to(device)

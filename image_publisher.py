@@ -10,6 +10,8 @@ from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+import sys, threading, signal, select, tty, termios
+from std_msgs.msg import Empty
 
 from sensor_msgs.msg import CameraInfo
 
@@ -46,6 +48,7 @@ class FolderCamera(Node):
         self.bridge = CvBridge()
         self.pub_img = self.create_publisher(Image, topic_image, 10)
         self.pub_info = self.create_publisher(CameraInfo, topic_info, 10)
+        self.pub_stop = self.create_publisher(Empty, '/stream/stop', 10)
 
         self.paths = sorted([p for p in glob.glob(os.path.join(folder, "*"))
                              if os.path.splitext(p)[1].lower() in (".jpg", ".jpeg", ".png", ".bmp", ".tiff")])
@@ -56,14 +59,41 @@ class FolderCamera(Node):
         self.dt = 1.0 / hz
         self.long_side_cap = long_side_cap
 
-        # Prime first frame to publish a valid CameraInfo
-        img0 = cv2.imread(self.paths[0])
-        img0 = self._resize(img0)
+        # prime camera info
+        img0 = cv2.imread(self.paths[0]); img0 = self._resize(img0)
         h, w = img0.shape[:2]
         self.cam_info = make_camera_info(w, h)
 
+        self._stop = threading.Event()
+        self._setup_signals()
+        self._start_key_listener()   # non-blocking key listener
+
         self.timer = self.create_timer(self.dt, self._tick)
         self.get_logger().info(f"Publishing {len(self.paths)} images at {hz} Hz from {folder}")
+
+    def _setup_signals(self):
+        def _sig_handler(sig, frame):
+            self.get_logger().info(f"Received signal {sig}; stopping publisher…")
+            self._stop.set()
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+
+    def _start_key_listener(self):
+        def _listen():
+            # Non-blocking stdin: press 'q' then Enter to quit
+            try:
+                while not self._stop.is_set():
+                    r, _, _ = select.select([sys.stdin], [], [], 0.2)
+                    if r:
+                        line = sys.stdin.readline().strip().lower()
+                        if line == 'q':
+                            self.get_logger().info("Keypress 'q' received; stopping publisher…")
+                            self._stop.set()
+                            break
+            except Exception:
+                pass
+        t = threading.Thread(target=_listen, daemon=True)
+        t.start()
 
     def _resize(self, img):
         h, w = img.shape[:2]
@@ -71,11 +101,19 @@ class FolderCamera(Node):
         if long_side <= self.long_side_cap:
             return img
         scale = self.long_side_cap / float(long_side)
-        new_w = int(round(w * scale))
-        new_h = int(round(h * scale))
-        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return cv2.resize(img, (int(round(w*scale)), int(round(h*scale))), interpolation=cv2.INTER_AREA)
 
     def _tick(self):
+        if self._stop.is_set():
+            # notify consumers, then shutdown
+            try:
+                self.pub_stop.publish(Empty())
+            except Exception:
+                pass
+            self.get_logger().info("Publisher shutting down.")
+            rclpy.shutdown()
+            return
+
         path = self.paths[self.index]
         img = cv2.imread(path)
         if img is None:
@@ -86,7 +124,6 @@ class FolderCamera(Node):
         img = self._resize(img)
         h, w = img.shape[:2]
 
-        # Update CameraInfo if size changed
         if self.cam_info.width != w or self.cam_info.height != h:
             self.cam_info = make_camera_info(w, h)
 
@@ -95,7 +132,6 @@ class FolderCamera(Node):
         self.cam_info.header.frame_id = "camera"
         self.pub_info.publish(self.cam_info)
 
-        # BGR8 → Image
         msg_img = self.bridge.cv2_to_imgmsg(img, encoding='bgr8')
         msg_img.header.stamp = stamp
         msg_img.header.frame_id = "camera"
@@ -107,7 +143,7 @@ class FolderCamera(Node):
                 self.index = 0
             else:
                 self.get_logger().info("Finished publishing all images.")
-                rclpy.shutdown()
+                self._stop.set()
 
 def main():
     ap = argparse.ArgumentParser()
