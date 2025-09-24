@@ -1,0 +1,384 @@
+import os
+import glob
+import argparse
+import time
+import threading
+import tempfile
+import shutil
+from collections import deque
+from queue import Queue, Empty
+from dataclasses import dataclass
+from typing import Optional, List, Tuple
+
+import numpy as np
+import torch
+import cv2
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+
+import vggt_slam.slam_utils as utils
+from vggt_slam.solver import Solver
+
+from vggt.models.vggt import VGGT
+
+# --- Optional ROS 2 imports (guarded) ---
+try:
+    import rclpy
+    from rclpy.node import Node
+    from sensor_msgs.msg import Image, CameraInfo
+    from cv_bridge import CvBridge
+    ROS_AVAILABLE = True
+except Exception:
+    ROS_AVAILABLE = False
+
+
+@dataclass
+class Frame:
+    img: np.ndarray           # HxWx3 uint8 (BGR as from cv_bridge) or RGB
+    ts: float                 # seconds (float)
+    seq: int                  # monotonic increasing
+    K: np.ndarray             # 3x3 intrinsics
+
+
+def resize_to_approx_2mp(img: np.ndarray, long_side_cap: int = 1920) -> np.ndarray:
+    """Resize keeping aspect ratio so that the long side <= long_side_cap (~2MP at 1920x1080).
+    Assumes img is HxWxC. Returns resized image (uint8)."""
+    h, w = img.shape[:2]
+    long_side = max(h, w)
+    if long_side <= long_side_cap:
+        return img
+    scale = long_side_cap / float(long_side)
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+class Ros2Ingest:
+    """ROS 2 subscriber that feeds a bounded Queue[Frame]."""
+    def __init__(self, topic_image: str, topic_info: str, out_queue: Queue, frame_id_start: int = 0, bgr_to_rgb: bool = True):
+        if not ROS_AVAILABLE:
+            raise RuntimeError("ROS 2 not available. Please install rclpy, sensor_msgs, cv_bridge.")
+        self._queue = out_queue
+        self._topic_image = topic_image
+        self._topic_info = topic_info
+        self._seq = frame_id_start
+        self._bridge = CvBridge()
+        self._bgr_to_rgb = bgr_to_rgb
+
+        rclpy.init(args=None)
+        self.node = Node('vggt_slam_live_ingest')
+        self._K: Optional[np.ndarray] = None
+
+        self._sub_info = self.node.create_subscription(CameraInfo, self._topic_info, self._on_info, 10)
+        self._sub_img = self.node.create_subscription(Image, self._topic_image, self._on_image, 10)
+
+        self._executor_thread = threading.Thread(target=self._spin, daemon=True)
+
+    def start(self):
+        self._executor_thread.start()
+
+    def shutdown(self):
+        try:
+            self.node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
+    def _spin(self):
+        rclpy.spin(self.node)
+
+    def _on_info(self, msg: CameraInfo):
+        # Build intrinsic matrix K
+        try:
+            K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
+            self._K = K
+        except Exception:
+            pass
+
+    def _on_image(self, msg: Image):
+        if self._K is None:
+            return  # wait for CameraInfo
+        try:
+            cv_img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception:
+            return
+        if self._bgr_to_rgb:
+            # VGGT typically expects RGB; downstream we stay consistent by writing with cv2 (BGR)
+            pass  # keep BGR here; convert at write-time if needed
+
+        # Resize to ~2 MP
+        cv_img = resize_to_approx_2mp(cv_img, long_side_cap=1920)
+
+        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        seq = self._seq
+        self._seq += 1
+
+        frame = Frame(img=cv_img, ts=ts, seq=seq, K=self._K.copy())
+
+        # Bounded put with tiny timeout to avoid blocking the ROS callback indefinitely
+        try:
+            self._queue.put(frame, block=False)
+        except Exception:
+            # Queue full: we intentionally do NOT drop here to honor decimation-on-consumer policy.
+            # As a compromise, try a short blocking put to let consumer catch up; otherwise drop this one.
+            try:
+                self._queue.put(frame, block=True, timeout=0.01)
+            except Exception:
+                # Drop as last resort; consumer will also decimate when pressured.
+                pass
+
+
+# --- Argument parser ---
+parser = argparse.ArgumentParser(description="VGGT-SLAM live/offline")
+# Existing args from the original script
+parser.add_argument("--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images")
+parser.add_argument("--vis_map", action="store_true", help="Visualize point cloud in viser as it is being build, otherwise only show the final map")
+parser.add_argument("--vis_flow", action="store_true", help="Visualize optical flow from RAFT for keyframe selection")
+parser.add_argument("--log_results", action="store_true", help="save txt file with results")
+parser.add_argument("--skip_dense_log", action="store_true", help="by default, logging poses and logs dense point clouds. If this flag is set, dense logging is skipped")
+parser.add_argument("--log_path", type=str, default="poses.txt", help="Path to save the log file")
+parser.add_argument("--use_sim3", action="store_true", help="Use Sim3 instead of SL(4)")
+parser.add_argument("--plot_focal_lengths", action="store_true", help="Plot focal lengths for the submaps")
+parser.add_argument("--submap_size", type=int, default=16, help="Number of new frames per submap, does not include overlapping frames or loop closure frames")
+parser.add_argument("--overlapping_window_size", type=int, default=1, help="ONLY DEFAULT OF 1 SUPPORTED RIGHT NOW. Number of overlapping frames, which are used in SL(4) estimation")
+parser.add_argument("--downsample_factor", type=int, default=1, help="Factor to reduce image size by 1/N")
+parser.add_argument("--max_loops", type=int, default=1, help="Maximum number of loop closures per submap")
+parser.add_argument("--min_disparity", type=float, default=50, help="Minimum disparity to generate a new keyframe")
+parser.add_argument("--use_point_map", action="store_true", help="Use point map instead of depth-based points")
+parser.add_argument("--conf_threshold", type=float, default=25.0, help="Initial percentage of low-confidence points to filter out")
+parser.add_argument("--vis_stride", type=int, default=1, help="Stride interval in the 3D point cloud image for visualization. Try increasing (such as 4) to reduce lag in visualizing large maps.")
+parser.add_argument("--vis_point_size", type=float, default=0.003, help="Visualization point size")
+
+# New live-stream args
+parser.add_argument("--live", action="store_true", help="Enable live streaming mode via ROS 2")
+parser.add_argument("--ros_image_topic", type=str, default="/camera/image_color", help="ROS 2 image topic")
+parser.add_argument("--ros_info_topic", type=str, default="/camera/camera_info", help="ROS 2 CameraInfo topic")
+parser.add_argument("--ros2_queue_size", type=int, default=60, help="Capacity of the ingest queue (frames)")
+parser.add_argument("--target_fps", type=float, default=2.0, help="Target processing frequency (Hz)")
+parser.add_argument("--window_size", type=int, default=15, help="Sliding window size for live processing")
+parser.add_argument("--decimate_floor", type=int, default=1, help="Minimum decimation stride (>=1)")
+parser.add_argument("--max_latency_s", type=float, default=1.0, help="Max acceptable staleness of a frame (s)")
+parser.add_argument("--temp_dir", type=str, default="", help="Optional directory to buffer live frames as images (falls back to tmp or /dev/shm)")
+
+
+def write_window_to_temp(paths_dir: str, frames: List[Frame], to_rgb: bool = False) -> List[str]:
+    """Write frames to disk and return list of file paths in the same order.
+    Uses JPEG with high quality to reduce CPU time and I/O size. """
+    os.makedirs(paths_dir, exist_ok=True)
+    file_paths = []
+    for f in frames:
+        # Encode as BGR for cv2.imencode. If imgs are BGR (from cv_bridge), we can write directly.
+        img = f.img
+        if to_rgb:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        fname = f"seq_{f.seq:08d}_ts_{f.ts:.6f}.jpg"
+        path = os.path.join(paths_dir, fname)
+        # Use imwrite (fast path) with JPEG quality 90
+        cv2.imwrite(path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        file_paths.append(path)
+    return file_paths
+
+
+def live_loop(args, solver: Solver, model: VGGT, device: str):
+    if not ROS_AVAILABLE:
+        raise RuntimeError("--live was set but ROS 2 is not available. Install rclpy, sensor_msgs, cv_bridge.")
+
+    frame_queue: Queue = Queue(maxsize=args.ros2_queue_size)
+    ros = Ros2Ingest(args.ros_image_topic, args.ros_info_topic, frame_queue)
+    ros.start()
+
+    # Temporary directory for frame shims (so solver.run_predictions can stay path-based)
+    base_tmp = args.temp_dir if args.temp_dir else ("/dev/shm" if os.path.exists("/dev/shm") else tempfile.gettempdir())
+    tmp_dir = tempfile.mkdtemp(prefix="vggt_live_", dir=base_tmp)
+
+    window = deque(maxlen=args.window_size + args.overlapping_window_size)
+    last_proc_wall = time.time() - 10.0
+    decimate = max(1, args.decimate_floor)
+
+    print(f"[LIVE] Using temp dir: {tmp_dir}")
+    print(f"[LIVE] Window={args.window_size} Overlap={args.overlapping_window_size} TargetFPS={args.target_fps}")
+
+    try:
+        while True:
+            try:
+                frame: Frame = frame_queue.get(timeout=0.05)
+            except Empty:
+                continue
+
+            # Optional latency guard using wall clock (as ROS time may not be comparable to wall time)
+            if (time.time() - frame.ts) > args.max_latency_s:
+                # too stale; skip (rare if clocks are synced)
+                continue
+
+            # Backpressure → adjust decimation based on queue fill level
+            qlen = frame_queue.qsize()
+            hi = int(0.8 * args.ros2_queue_size)
+            lo = int(0.3 * args.ros2_queue_size)
+            if qlen > hi:
+                decimate = max(decimate + 1, args.decimate_floor)
+            elif qlen < lo and decimate > args.decimate_floor:
+                decimate -= 1
+
+            # Respect decimation stride by sequence id
+            if (frame.seq % decimate) != 0:
+                continue
+
+            window.append(frame)
+
+            # Pace by target FPS using wall time
+            now = time.time()
+            if (now - last_proc_wall) < (1.0 / max(1e-6, args.target_fps)):
+                continue
+
+            need = args.window_size + args.overlapping_window_size
+            if len(window) < need:
+                continue
+
+            # Convert window frames to image paths via temp files
+            # (No need to write K per-frame here; if your solver needs intrinsics, extend the API.)
+            subdir = os.path.join(tmp_dir, f"batch_{window[0].seq:08d}")
+            img_paths = write_window_to_temp(subdir, list(window))
+
+            # Run solver with current window
+            predictions = solver.run_predictions(img_paths, model, args.max_loops)
+
+            solver.add_points(predictions)
+            solver.graph.optimize()
+            solver.map.update_submap_homographies(solver.graph)
+
+            loop_closure_detected = len(predictions.get("detected_loops", [])) > 0
+            if args.vis_map:
+                if loop_closure_detected:
+                    solver.update_all_submap_vis()
+                else:
+                    solver.update_latest_submap_vis()
+
+            # Keep overlap frames only
+            while len(window) > args.overlapping_window_size:
+                window.popleft()
+
+            last_proc_wall = now
+
+    except KeyboardInterrupt:
+        print("[LIVE] Interrupted by user. Shutting down...")
+    finally:
+        ros.shutdown()
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def offline_loop(args, solver: Solver, model: VGGT, device: str):
+    use_optical_flow_downsample = True
+
+    print(f"Loading images from {args.image_folder}...")
+    image_names = [f for f in glob.glob(os.path.join(args.image_folder, "*"))
+                   if "depth" not in os.path.basename(f).lower() and "txt" not in os.path.basename(f).lower()
+                   and "db" not in os.path.basename(f).lower()]
+
+    image_names = utils.sort_images_by_number(image_names)
+    image_names = utils.downsample_images(image_names, args.downsample_factor)
+    print(f"Found {len(image_names)} images")
+
+    image_names_subset = []
+    data = []
+    for image_name in tqdm(image_names):
+        if use_optical_flow_downsample:
+            img = cv2.imread(image_name)
+            enough_disparity = solver.flow_tracker.compute_disparity(img, args.min_disparity, args.vis_flow)
+            if enough_disparity:
+                image_names_subset.append(image_name)
+        else:
+            image_names_subset.append(image_name)
+
+        # Run submap processing if enough images are collected or if it's the last group of images.
+        if len(image_names_subset) == args.submap_size + args.overlapping_window_size or image_name == image_names[-1]:
+            print(image_names_subset)
+            predictions = solver.run_predictions(image_names_subset, model, args.max_loops)
+
+            data.append(predictions["intrinsic"][:, 0, 0])
+
+            solver.add_points(predictions)
+
+            solver.graph.optimize()
+            solver.map.update_submap_homographies(solver.graph)
+
+            loop_closure_detected = len(predictions["detected_loops"]) > 0
+            if args.vis_map:
+                if loop_closure_detected:
+                    solver.update_all_submap_vis()
+                else:
+                    solver.update_latest_submap_vis()
+
+            # Reset for next submap.
+            image_names_subset = image_names_subset[-args.overlapping_window_size:]
+
+    print("Total number of submaps in map", solver.map.get_num_submaps())
+    print("Total number of loop closures in map", solver.graph.get_num_loops())
+
+    if not args.vis_map:
+        # just show the map after all submaps have been processed
+        solver.update_all_submap_vis()
+
+    if args.log_results:
+        solver.map.write_poses_to_file(args.log_path)
+
+        if not args.skip_dense_log:
+            # Log the dense point cloud for each submap.
+            solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
+
+    if args.plot_focal_lengths:
+        # Define a colormap
+        colors = plt.cm.viridis(np.linspace(0, 1, len(data)))
+        # Create the scatter plot
+        plt.figure(figsize=(8, 6))
+        for i, values in enumerate(data):
+            y = values  # Y-values from the list
+            x = [i] * len(values)  # X-values (same for all points in the list)
+            plt.scatter(x, y, color=colors[i], label=f'List {i+1}')
+
+        plt.xlabel("poses")
+        plt.ylabel("Focal lengths")
+        plt.grid()
+        plt.show()
+
+
+def main():
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    solver = Solver(
+        init_conf_threshold=args.conf_threshold,
+        use_point_map=args.use_point_map,
+        use_sim3=args.use_sim3,
+        gradio_mode=False,
+        vis_stride=args.vis_stride,
+        vis_point_size=args.vis_point_size,
+    )
+
+    print("Initializing and loading VGGT model...")
+
+    model = VGGT()
+    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+
+    model.eval()
+    model = model.to(device)
+
+    if args.live:
+        if args.overlapping_window_size != 1:
+            print("[WARN] overlapping_window_size other than 1 is not supported; forcing to 1 for live mode.")
+            args.overlapping_window_size = 1
+        live_loop(args, solver, model, device)
+    else:
+        offline_loop(args, solver, model, device)
+
+
+if __name__ == "__main__":
+    main()
