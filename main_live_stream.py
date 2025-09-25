@@ -301,6 +301,9 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
             print("Saved points to file", args.log_path.replace(".txt", "_points.pcd"))
             if not args.skip_dense_log:
                 solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
+            
+            import move_results
+            move_results.main()
 
         if args.plot_focal_lengths:
             colors = plt.cm.viridis(np.linspace(0, 1, len(data)))
@@ -376,6 +379,8 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str):
         print("Saved points to file", args.log_path.replace(".txt", "_points.pcd"))
         if not args.skip_dense_log:
             solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
+        import move_results
+        move_results.main()
 
     if args.plot_focal_lengths:
         colors = plt.cm.viridis(np.linspace(0, 1, len(data)))
