@@ -353,6 +353,7 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str):
         solver.map.write_poses_to_file(args.log_path)
         # Log the full point cloud as one file, used for visualization.
         solver.map.write_points_to_file(args.log_path.replace(".txt", "_points.pcd"))
+        print("Saved points to file", args.log_path.replace(".txt", "_points.pcd"))
         if not args.skip_dense_log:
             solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
 

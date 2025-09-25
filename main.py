@@ -115,7 +115,7 @@ def main():
         solver.map.write_poses_to_file(args.log_path)
 
         # Log the full point cloud as one file, used for visualization.
-        # solver.map.write_points_to_file(args.log_path.replace(".txt", "_points.pcd"))
+        solver.map.write_points_to_file(args.log_path.replace(".txt", "_points.pcd"))
 
         if not args.skip_dense_log:
             # Log the dense point cloud for each submap.
