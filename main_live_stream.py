@@ -296,6 +296,26 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
         except Exception:
             pass
 
+        if not args.vis_map:
+        solver.update_all_submap_vis()
+
+        if args.log_results:
+            solver.map.write_poses_to_file(args.log_path)
+            # Log the full point cloud as one file, used for visualization.
+            solver.map.write_points_to_file(args.log_path.replace(".txt", "_points.pcd"))
+            print("Saved points to file", args.log_path.replace(".txt", "_points.pcd"))
+            if not args.skip_dense_log:
+                solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
+
+        if args.plot_focal_lengths:
+            colors = plt.cm.viridis(np.linspace(0, 1, len(data)))
+            plt.figure(figsize=(8, 6))
+            for i, values in enumerate(data):
+                y = values
+                x = [i] * len(values)
+                plt.scatter(x, y, color=colors[i], label=f'List {i+1}')
+            plt.xlabel("poses"); plt.ylabel("Focal lengths"); plt.grid(); plt.show()
+
 
 # ----------------- Offline loop (unchanged) -----------
 def offline_loop(args, solver: Solver, model: VGGT, device: str):
