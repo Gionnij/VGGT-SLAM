@@ -8,7 +8,7 @@ import threading
 import tempfile
 import shutil
 from collections import deque
-from queue import Queue, Empty
+from queue import Queue, Empty as QueueEmpty
 from dataclasses import dataclass
 from typing import Optional, List
 
@@ -29,7 +29,7 @@ try:
     from rclpy.node import Node
     from sensor_msgs.msg import Image, CameraInfo
     from cv_bridge import CvBridge
-    from std_msgs.msg import Empty  # for /stream/stop
+    from std_msgs.msg import Empty as StopMsg  # for /stream/stop
     ROS_AVAILABLE = True
 except Exception:
     pass
@@ -86,8 +86,7 @@ class Ros2Ingest:
 
         self._sub_info = self.node.create_subscription(CameraInfo, self._topic_info, self._on_info, 10)
         self._sub_img = self.node.create_subscription(Image, self._topic_image, self._on_image, 10)
-        self._sub_stop = self.node.create_subscription(Empty, '/stream/stop', self._on_stop, 10)
-
+        self._sub_stop = self.node.create_subscription(StopMsg, '/stream/stop', self._on_stop, 10)
         self._executor_thread = threading.Thread(target=self._spin, daemon=True)
 
     def start(self):
@@ -106,7 +105,7 @@ class Ros2Ingest:
     def _spin(self):
         rclpy.spin(self.node)
 
-    def _on_stop(self, _: Empty):
+    def _on_stop(self, _: StopMsg):
         if self._stop_event is not None:
             self.node.get_logger().info("Received /stream/stop; stopping ingest…")
             self._stop_event.set()
@@ -233,7 +232,7 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
 
             try:
                 frame: Frame = frame_queue.get(timeout=0.05)
-            except Empty:
+            except QueueEmpty:
                 continue
 
             # Optional latency guard using wall time (assumes clocks are roughly synced)
