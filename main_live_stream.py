@@ -291,13 +291,8 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
         print("[LIVE] Interrupted by user. Shutting down…")
     finally:
         ros.shutdown()
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
-
         if not args.vis_map:
-        solver.update_all_submap_vis()
+            solver.update_all_submap_vis()
 
         if args.log_results:
             solver.map.write_poses_to_file(args.log_path)
@@ -315,6 +310,11 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
                 x = [i] * len(values)
                 plt.scatter(x, y, color=colors[i], label=f'List {i+1}')
             plt.xlabel("poses"); plt.ylabel("Focal lengths"); plt.grid(); plt.show()
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
 
 
 # ----------------- Offline loop (unchanged) -----------
