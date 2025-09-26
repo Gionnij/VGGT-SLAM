@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import vggt_slam.slam_utils as utils
 from vggt_slam.solver import Solver
 from vggt.models.vggt import VGGT
+from taps_runtime import attach_vggt_taps
 
 # ---------- Optional ROS 2 imports (guarded) ----------
 ROS_AVAILABLE = False
@@ -56,6 +57,9 @@ def resize_to_approx_2mp(img: np.ndarray, long_side_cap: int = 1920) -> np.ndarr
     new_h = int(round(h * scale))
     return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
+
+# Global tapper for taps_runtime
+tapper = None
 
 # ----------------- ROS 2 Ingest -----------------------
 class Ros2Ingest:
@@ -287,6 +291,13 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
 
             last_proc_wall = now
 
+            # Log compact JSON record once per live step
+            if tapper is not None:
+                try:
+                    tapper.maybe_log()
+                except Exception:
+                    pass
+
     except KeyboardInterrupt:
         print("[LIVE] Interrupted by user. Shutting down…")
     finally:
@@ -349,6 +360,11 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str):
         if len(image_names_subset) == args.submap_size + args.overlapping_window_size or image_name == image_names[-1]:
             print(image_names_subset)
             predictions = solver.run_predictions(image_names_subset, model, args.max_loops)
+            if tapper is not None:
+                try:
+                    tapper.maybe_log()
+                except Exception:
+                    pass
 
             data.append(predictions["intrinsic"][:, 0, 0])
 
@@ -423,7 +439,12 @@ def main():
     model.load_state_dict(state)
 
     model.eval()
+
     model = model.to(device)
+    
+    # Attach taps right after model instantiation/eval
+    global tapper
+    tapper = attach_vggt_taps(model, logdir="tap_logs", capture_every=1)
 
     if args.live:
         if args.overlapping_window_size != 1:
