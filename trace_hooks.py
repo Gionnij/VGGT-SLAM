@@ -7,7 +7,8 @@ Solver.run_predictions (TraceSink, step id, frame ids, and window tensor).
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
+import types
 
 import torch
 from torch import nn
@@ -92,51 +93,34 @@ def install_trace_probes(model: nn.Module) -> List[torch.utils.hooks.RemovableHa
     Attach pre-forward hooks that log frame indices entering the DINO and DPT
     pipelines. Returns a list of handles so callers can remove them if needed.
     """
-    modmap = {name: module for name, module in model.named_modules()}
-    handles: List[torch.utils.hooks.RemovableHandle] = []
+    # Wrap aggregator patch embed to capture DINO indices.
+    agg = getattr(model, "aggregator", None)
+    patch_embed = getattr(agg, "patch_embed", None) if agg is not None else None
+    if patch_embed is not None and not getattr(patch_embed, "_trace_wrapped", False):
+        orig_forward = patch_embed.forward
 
-    # DINO branch: target the patch embedding pre-hook (closest to image input).
-    dino_candidates = [
-        "aggregator.patch_embed.patch_embed",
-        "aggregator.patch_embed.proj",
-    ]
-    for name in dino_candidates:
-        if name not in modmap:
-            continue
-
-        def _dino_hook(module, inputs):
-            if not inputs:
-                return
-            x = inputs[0]
+        def _wrapped_patch(self, *args, **kwargs):
+            x = args[0] if args else kwargs.get("x")
             if isinstance(x, torch.Tensor):
                 _log_indices(model, "dino_indices", x)
+            return orig_forward(*args, **kwargs)
 
-        handles.append(modmap[name].register_forward_pre_hook(_dino_hook))
-        break
+        patch_embed.forward = types.MethodType(_wrapped_patch, patch_embed)
+        patch_embed._trace_wrapped = True
 
-    # DPT branch: best effort to catch the image tensor before entering depth head.
-    dpt_candidates = [
-        "depth_head.backbone",
-        "depth_head.encoder",
-        "depth_head.model",
-    ]
-    for name in dpt_candidates:
-        if name not in modmap:
-            continue
+    # Wrap depth head forward to capture DPT indices.
+    depth_head = getattr(model, "depth_head", None)
+    if depth_head is not None and not getattr(depth_head, "_trace_wrapped", False):
+        orig_forward = depth_head.forward
 
-        def _dpt_hook(module, inputs):
-            if not inputs:
-                return
-            x = inputs[0]
+        def _wrapped_depth(self, *args, **kwargs):
+            x = args[0] if args else kwargs.get("x")
             if isinstance(x, torch.Tensor):
                 _log_indices(model, "dpt_indices", x)
+            return orig_forward(*args, **kwargs)
 
-        handles.append(modmap[name].register_forward_pre_hook(_dpt_hook))
-        break
+        depth_head.forward = types.MethodType(_wrapped_depth, depth_head)
+        depth_head._trace_wrapped = True
 
-    if handles:
-        combined = list(getattr(model, "_trace_handles", []))
-        combined.extend(handles)
-        model._trace_handles = combined
-
-    return handles
+    setattr(model, "_trace_wrapped", True)
+    return []

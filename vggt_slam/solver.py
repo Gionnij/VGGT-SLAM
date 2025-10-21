@@ -447,10 +447,11 @@ class Solver:
         prev_trace_state = getattr(model, "_trace_state", None)
 
         if trace_sink is not None:
-            if not getattr(model, "_trace_handles", None):
+            if not getattr(model, "_trace_wrapped", False):
                 try:
                     from trace_hooks import install_trace_probes
                     install_trace_probes(model)
+                    model._trace_wrapped = True
                 except Exception:
                     pass
             model._trace_sink = trace_sink
