@@ -7,6 +7,7 @@ import open3d as o3d
 import viser
 import viser.transforms as viser_tf
 from termcolor import colored
+from typing import Optional, Sequence
 
 from vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
 from vggt.utils.load_fn import load_and_preprocess_images
@@ -395,13 +396,22 @@ class Solver:
         pixel_coords = torch.stack((y_coords, x_coords), dim=1)
         return pixel_coords
 
-    def run_predictions(self, image_names, model, max_loops):
+    def run_predictions(
+        self,
+        image_names,
+        model,
+        max_loops,
+        trace_sink=None,
+        step_id: Optional[int] = None,
+        frame_ids_window: Optional[Sequence[str]] = None,
+    ):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         images = load_and_preprocess_images(image_names).to(device)
         print(f"Preprocessed images shape: {images.shape}")
 
         # print("Running inference...")
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        window_tensor = images
 
         # Check for loop closures
         new_pcd_num = self.map.get_largest_key() + 1
@@ -429,9 +439,39 @@ class Solver:
 
         self.current_working_submap = new_submap
 
-        with torch.no_grad():
-            with torch.cuda.amp.autocast(dtype=dtype):
-                predictions = model(images)
+        prev_sink = getattr(model, "_trace_sink", None)
+        prev_step = getattr(model, "_trace_step", None)
+        prev_frame_ids = getattr(model, "_trace_frame_ids", None)
+        prev_window_tensor = getattr(model, "_trace_window_tensor", None)
+        prev_window_length = getattr(model, "_trace_window_length", None)
+        prev_trace_state = getattr(model, "_trace_state", None)
+
+        if trace_sink is not None:
+            if not getattr(model, "_trace_handles", None):
+                try:
+                    from trace_hooks import install_trace_probes
+                    install_trace_probes(model)
+                except Exception:
+                    pass
+            model._trace_sink = trace_sink
+            model._trace_step = step_id
+            model._trace_frame_ids = frame_ids_window
+            model._trace_window_tensor = window_tensor
+            model._trace_window_length = len(frame_ids_window) if frame_ids_window is not None else images.shape[0]
+            model._trace_state = {}
+
+        try:
+            with torch.no_grad():
+                with torch.cuda.amp.autocast(dtype=dtype):
+                    predictions = model(images)
+        finally:
+            if trace_sink is not None:
+                model._trace_sink = prev_sink
+                model._trace_step = prev_step
+                model._trace_frame_ids = prev_frame_ids
+                model._trace_window_tensor = prev_window_tensor
+                model._trace_window_length = prev_window_length
+                model._trace_state = prev_trace_state
 
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         predictions["extrinsic"] = extrinsic

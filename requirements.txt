@@ -1,3 +1,4 @@
+# Requires ROS 2 (e.g., Humble): rclpy, sensor_msgs, cv_bridge (install via apt/conda/container, not pip)
 torch==2.3.1
 torchvision==0.18.1
 numpy
