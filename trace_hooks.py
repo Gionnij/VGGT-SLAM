@@ -7,7 +7,7 @@ Solver.run_predictions (TraceSink, step id, frame ids, and window tensor).
 """
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 import types
 
 import torch
@@ -99,11 +99,11 @@ def install_trace_probes(model: nn.Module) -> List[torch.utils.hooks.RemovableHa
     if patch_embed is not None and not getattr(patch_embed, "_trace_wrapped", False):
         orig_forward = patch_embed.forward
 
-        def _wrapped_patch(self, *args, **kwargs):
+        def _wrapped_patch(self, *args, _orig=orig_forward, **kwargs):
             x = args[0] if args else kwargs.get("x")
             if isinstance(x, torch.Tensor):
                 _log_indices(model, "dino_indices", x)
-            return orig_forward(*args, **kwargs)
+            return _orig(*args, **kwargs)
 
         patch_embed.forward = types.MethodType(_wrapped_patch, patch_embed)
         patch_embed._trace_wrapped = True
@@ -113,11 +113,11 @@ def install_trace_probes(model: nn.Module) -> List[torch.utils.hooks.RemovableHa
     if depth_head is not None and not getattr(depth_head, "_trace_wrapped", False):
         orig_forward = depth_head.forward
 
-        def _wrapped_depth(self, *args, **kwargs):
+        def _wrapped_depth(self, *args, _orig=orig_forward, **kwargs):
             x = args[0] if args else kwargs.get("x")
             if isinstance(x, torch.Tensor):
                 _log_indices(model, "dpt_indices", x)
-            return orig_forward(*args, **kwargs)
+            return _orig(*args, **kwargs)
 
         depth_head.forward = types.MethodType(_wrapped_depth, depth_head)
         depth_head._trace_wrapped = True
