@@ -112,6 +112,24 @@ class DPTHead(nn.Module):
                 nn.Conv2d(head_features_2, output_dim, kernel_size=1, stride=1, padding=0),
             )
 
+        # FiLM fusion (disabled unless VGGT_FUSE_FILM=1).
+        self.film_enabled = os.getenv("VGGT_FUSE_FILM", "0") == "1"
+        film_hidden = int(os.getenv("VGGT_FUSE_FILM_HIDDEN", "512"))
+        self.film_blend_on = os.getenv("VGGT_FUSE_FILM_BLEND", "1") != "0"
+        if self.film_enabled:
+            self.film_cond_proj = nn.Conv2d(dim_in, 256, kernel_size=1, stride=1, padding=0)
+            self.film_mlps = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(256, film_hidden),
+                        nn.ReLU(inplace=True),
+                        nn.Linear(film_hidden, 2 * oc),
+                    )
+                    for oc in out_channels
+                ]
+            )
+            self.film_gates = nn.Parameter(torch.zeros(len(out_channels)))
+
     def forward(
         self,
         aggregated_tokens_list: List[torch.Tensor],
@@ -202,6 +220,18 @@ class DPTHead(nn.Module):
         out = []
         dpt_idx = 0
 
+        film_cond_vecs: Dict[int, torch.Tensor] = {}
+        if getattr(self, "film_enabled", False):
+            for li, lvl in enumerate(self.intermediate_layer_idx):
+                cond_tokens = aggregated_tokens_list[lvl][:, :, patch_start_idx:]
+                if frames_start_idx is not None and frames_end_idx is not None:
+                    cond_tokens = cond_tokens[:, frames_start_idx:frames_end_idx]
+                cond_tokens = cond_tokens.contiguous().view(B * S, -1, cond_tokens.shape[-1])
+                cond_tokens = self.norm(cond_tokens)
+                cond_maps = cond_tokens.permute(0, 2, 1).reshape(B * S, cond_tokens.shape[-1], patch_h, patch_w)
+                c = self.film_cond_proj(cond_maps)
+                film_cond_vecs[li] = torch.mean(c, dim=(2, 3))
+
         for layer_idx in self.intermediate_layer_idx:
             x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
 
@@ -216,6 +246,18 @@ class DPTHead(nn.Module):
             x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
 
             x = self.projects[dpt_idx](x)
+            if getattr(self, "film_enabled", False):
+                c_vec = film_cond_vecs.get(dpt_idx, None)
+                if c_vec is not None:
+                    gb = self.film_mlps[dpt_idx](c_vec)
+                    gb = gb.view(B * S, 2, x.shape[1], 1, 1)
+                    gamma, beta = gb[:, 0], gb[:, 1]
+                    x_film = gamma * x + beta
+                    if self.film_blend_on:
+                        alpha = torch.sigmoid(self.film_gates[dpt_idx])
+                        x = (1.0 - alpha) * x + alpha * x_film
+                    else:
+                        x = x_film
             if self.pos_embed:
                 x = self._apply_pos_embed(x, W, H)
             x = self.resize_layers[dpt_idx](x)
