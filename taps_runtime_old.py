@@ -219,46 +219,6 @@ class VGGTFeatureTapper:
             "equal": (Bdpt == Bdino) if (Bdpt is not None and Bdino is not None) else None,
         }
 
-        # ---- optional: alignment summary between DPT p5 and DINO p5_like ----
-        align_summary = None
-        try:
-            dpt_p5 = dpt.get("p5", None) if dpt else None
-            if dpt_p5 is not None and dino_fmap is not None:
-                # GAP to vectors
-                dpt_vec = dpt_p5.mean(dim=(2, 3))       # [Bdpt, 256]
-                dino_vec = dino_fmap.mean(dim=(2, 3))   # [Bdino, 256]
-                # normalize for cosine
-                dpt_norm = torch.nn.functional.normalize(dpt_vec, dim=1)
-                dino_norm = torch.nn.functional.normalize(dino_vec, dim=1)
-                # similarity: [Bdpt, Bdino]
-                S = dpt_norm @ dino_norm.t()
-                # best match per DPT frame
-                best = torch.argmax(S, dim=1)          # [Bdpt], indices into Bdino
-                best_list = best.detach().cpu().tolist()
-
-                # quick heuristic: are these all-even or all-odd (stride-2 pattern)?
-                if len(best_list) >= 2:
-                    parity = [i % 2 for i in best_list]
-                    if all(p == 0 for p in parity):
-                        guess = "even_indices"
-                    elif all(p == 1 for p in parity):
-                        guess = "odd_indices"
-                    else:
-                        guess = "mixed"
-                else:
-                    guess = "unknown"
-
-                align_summary = {
-                    "best_dino_idx_per_dpt": best_list,    # e.g., [0,2,4,6,8,10,12,14]
-                    "stride2_guess": guess,                # "even_indices" / "odd_indices" / "mixed"
-                    "sim_max_per_dpt": S.max(dim=1).values.detach().cpu().tolist(),
-                }
-        except Exception as _e:
-            align_summary = {"error": str(_e)}
-
-        # Attach it to the record:
-        rec["alignment"] = align_summary
-
         self.writer.write(rec)
 
         # optional: persist tiny samples for offline checks

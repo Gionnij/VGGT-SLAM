@@ -268,23 +268,9 @@ def live_loop(args, solver: Solver, model: VGGT, device: str):
             if len(window) < need:
                 continue
 
-            # Convert window frames to image paths via temp files
+            # Convert window frames to image paths via temp files (keeps solver API unchanged)
             subdir = os.path.join(tmp_dir, f"batch_{window[0].seq:08d}")
             img_paths = write_window_to_temp(subdir, list(window))
-
-            if tapper is not None:
-                try:
-                    # Frame IDs from filenames (deterministic and human-readable)
-                    frame_ids_window = [os.path.basename(p) for p in img_paths]
-                    tapper.set_batch_meta(
-                        step=int(window[0].seq),            # any monotonically increasing int is fine
-                        t=time.time(),
-                        window_len=len(img_paths),
-                        frame_ids_window=frame_ids_window,  # what we asked the model to process
-                        # input_hw is optional; tapper already sniffs it from the patch_embed pre-hook
-                    )
-                except Exception:
-                    pass
 
             # Run solver with current window
             predictions = solver.run_predictions(img_paths, model, args.max_loops)
@@ -374,21 +360,7 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str):
         # Run submap processing if enough images are collected or if it's the last group of images.
         if len(image_names_subset) == args.submap_size + args.overlapping_window_size or image_name == image_names[-1]:
             print(image_names_subset)
-
-            if tapper is not None:
-                try:
-                    frame_ids_window = [os.path.basename(p) for p in image_names_subset]
-                    tapper.set_batch_meta(
-                        step=len(data),                   # or any step counter you prefer
-                        t=time.time(),
-                        window_len=len(image_names_subset),
-                        frame_ids_window=frame_ids_window,
-                    )
-                except Exception:
-                    pass
-
             predictions = solver.run_predictions(image_names_subset, model, args.max_loops)
-
             if tapper is not None:
                 try:
                     tapper.maybe_log()
