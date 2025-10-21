@@ -14,6 +14,28 @@ import torch
 from torch import nn
 
 
+def _first_image_tensor(args, kwargs) -> Optional[torch.Tensor]:
+    """
+    Heuristic to locate the image batch within *args / kwargs*.
+    Prefers 4D tensors (B,C,H,W) with 3-channel input.
+    """
+    candidates = []
+    # Positional tensors first
+    for obj in args:
+        if isinstance(obj, torch.Tensor) and obj.dim() >= 4:
+            candidates.append(obj)
+    # Keyword tensors using common names
+    for key in ("images", "imgs", "x", "input"):
+        obj = kwargs.get(key)
+        if isinstance(obj, torch.Tensor) and obj.dim() >= 4:
+            candidates.append(obj)
+    if not candidates:
+        return None
+    # Prefer tensors with C==3 to avoid picking e.g., feature maps
+    candidates.sort(key=lambda t: (t.shape[1] != 3, -t.shape[0]))
+    return candidates[0]
+
+
 def _match_indices(batch: torch.Tensor, source: torch.Tensor) -> Optional[List[int]]:
     """
     Compute, for each row in *batch*, the index of the closest matching frame
@@ -66,6 +88,15 @@ def _log_indices(
         if isinstance(frame_ids_window, Sequence):
             frame_ids_window = list(frame_ids_window)[:window_len]
 
+    # Flatten batch/time dimensions if necessary to align with stored window tensor.
+    if isinstance(batch, torch.Tensor):
+        if batch.dim() == 5:  # (B,S,C,H,W)
+            batch = batch.reshape(-1, *batch.shape[-3:])
+        elif batch.dim() == 4 and window_tensor.dim() == 5:
+            window_tensor = window_tensor.reshape(-1, *window_tensor.shape[-3:])
+    if isinstance(window_tensor, torch.Tensor) and window_tensor.dim() == 5:
+        window_tensor = window_tensor.reshape(-1, *window_tensor.shape[-3:])
+
     indices = _match_indices(batch, window_tensor)
     if indices is None:
         return
@@ -100,7 +131,7 @@ def install_trace_probes(model: nn.Module) -> List[torch.utils.hooks.RemovableHa
         orig_forward = patch_embed.forward
 
         def _wrapped_patch(self, *args, _orig=orig_forward, **kwargs):
-            x = args[0] if args else kwargs.get("x")
+            x = _first_image_tensor(args, kwargs)
             if isinstance(x, torch.Tensor):
                 _log_indices(model, "dino_indices", x)
             return _orig(*args, **kwargs)
@@ -114,7 +145,7 @@ def install_trace_probes(model: nn.Module) -> List[torch.utils.hooks.RemovableHa
         orig_forward = depth_head.forward
 
         def _wrapped_depth(self, *args, _orig=orig_forward, **kwargs):
-            x = args[0] if args else kwargs.get("x")
+            x = _first_image_tensor(args, kwargs)
             if isinstance(x, torch.Tensor):
                 _log_indices(model, "dpt_indices", x)
             return _orig(*args, **kwargs)
