@@ -479,6 +479,11 @@ class Solver:
             from vggt.heads.semantic_runner import run_semantic_if_enabled
             device = next(model.parameters()).device
             run_semantic_if_enabled(model, predictions, device)
+            sem_masks = predictions.get("sem_mask_logits")
+            sem_cls = predictions.get("sem_cls_logits")
+            if sem_masks is not None and sem_cls is not None:
+                # TODO: remove once semantic head is verified.
+                print("[SEM] mask_logits:", tuple(sem_masks.shape), "cls_logits:", tuple(sem_cls.shape))
         except Exception:
             pass
 
