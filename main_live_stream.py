@@ -12,6 +12,7 @@ from collections import deque
 from queue import Queue, Empty as QueueEmpty
 from dataclasses import dataclass
 from typing import Optional, List
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -458,6 +459,26 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Opt
 # ----------------- Main -------------------------------
 def main():
     args = parser.parse_args()
+
+    # Rotate tap log (keep last 3 runs) before starting a new session
+    log_path = Path("tap_logs") / "taps.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _rotate_log(path: Path, keep: int = 3) -> None:
+        if not path.exists():
+            return
+        for idx in range(keep, 0, -1):
+            src = path.with_name(f"{path.name}.{idx}")
+            dst = path.with_name(f"{path.name}.{idx + 1}")
+            if src.exists():
+                if idx == keep:
+                    src.unlink()
+                else:
+                    src.replace(dst)
+        path.replace(path.with_name(f"{path.name}.1"))
+
+    _rotate_log(log_path, keep=3)
+    log_path.touch()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
