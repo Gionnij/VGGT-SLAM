@@ -483,7 +483,35 @@ def main():
         print("Local model not found; attempting to download (requires internet)…")
         _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
         state = torch.hub.load_state_dict_from_url(_URL)
-    model.load_state_dict(state)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+
+    if missing:
+        print(f"[VGGT] Loaded with non-strict. Missing keys (new params): {len(missing)}")
+        for key in missing[:10]:
+            print("  missing:", key)
+        if len(missing) > 10:
+            print("  …")
+
+    if unexpected:
+        print(f"[VGGT] Unexpected keys in checkpoint (ignored): {len(unexpected)}")
+        for key in unexpected[:10]:
+            print("  unexpected:", key)
+        if len(unexpected) > 10:
+            print("  …")
+
+    try:
+        dh = getattr(model, "depth_head", None)
+        if dh is not None and getattr(dh, "film_enabled", False):
+            gates = (
+                torch.sigmoid(dh.film_gates).detach().cpu().tolist()
+                if hasattr(dh, "film_gates")
+                else None
+            )
+            print("[VGGT] FiLM enabled?", True, "gates:", gates)
+        else:
+            print("[VGGT] FiLM enabled?", False)
+    except Exception as exc:
+        print(f"[VGGT] FiLM inspection failed: {exc}")
 
     model.eval()
 
