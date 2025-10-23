@@ -484,12 +484,15 @@ class Solver:
             if sem_masks is not None and sem_cls is not None:
                 # TODO: remove once semantic head is verified.
                 print("[SEM] mask_logits:", tuple(sem_masks.shape), "cls_logits:", tuple(sem_cls.shape))
+        except Exception:
+            pass
 
-            ######### TODO: remove FiLM delta probe after validation.
-            dh = getattr(model, "depth_head", None)
-            raw_pyr = getattr(dh, "raw_pyramid", None) if dh is not None else None
-            film_pyr = getattr(dh, "film_side_pyramid", None) if dh is not None else None
-            if raw_pyr and film_pyr:
+        # TODO: remove FiLM delta probe after validation.
+        dh = getattr(model, "depth_head", None)
+        raw_pyr = getattr(dh, "raw_pyramid", None) if dh is not None else None
+        film_pyr = getattr(dh, "film_side_pyramid", None) if dh is not None else None
+        if raw_pyr and film_pyr:
+            try:
                 deltas = []
                 for raw_lvl, film_lvl in zip(raw_pyr, film_pyr):
                     if raw_lvl is None or film_lvl is None:
@@ -503,10 +506,10 @@ class Solver:
                     cos = (num / den).mean().item()
                     deltas.append((mad, cos))
                 print("[FiLM Δ] per-level MAD/COS:", deltas)
-        ######### Remove till here
-
-        except Exception:
-            pass
+            except Exception:
+                print("[FiLM Δ] probe failed")
+        else:
+            print("[FiLM Δ] pyramid unavailable (raw or FiLM missing)")
 
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         predictions["extrinsic"] = extrinsic
