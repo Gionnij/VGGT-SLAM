@@ -474,6 +474,14 @@ class Solver:
                 model._trace_window_length = prev_window_length
                 model._trace_state = prev_trace_state
 
+        # Optional semantic head sidecar (no effect if module/env absent)
+        try:
+            from vggt.heads.semantic_runner import run_semantic_if_enabled
+            device = next(model.parameters()).device
+            run_semantic_if_enabled(model, predictions, device)
+        except Exception:
+            pass
+
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         predictions["extrinsic"] = extrinsic
         predictions["intrinsic"] = intrinsic
