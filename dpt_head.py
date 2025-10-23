@@ -8,8 +8,9 @@
 # Inspired by https://github.com/DepthAnything/Depth-Anything-V2
 
 
+import math
 import os
-from typing import List, Dict, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -112,10 +113,17 @@ class DPTHead(nn.Module):
                 nn.Conv2d(head_features_2, output_dim, kernel_size=1, stride=1, padding=0),
             )
 
-        # FiLM fusion (disabled unless VGGT_FUSE_FILM=1).
-        self.film_enabled = os.getenv("VGGT_FUSE_FILM", "0") == "1"
+        # ---- FiLM controls & modules (built only when enabled) ----
+        self.film_mode = os.getenv("VGGT_FUSE_FILM_MODE", "passive").strip().lower()
+        if self.film_mode not in {"off", "passive", "active"}:
+            self.film_mode = "passive"
+        self.film_enabled = os.getenv("VGGT_FUSE_FILM", "0") == "1" and self.film_mode != "off"
+        self.film_blend_on = os.getenv("VGGT_FUSE_FILM_BLEND", "1") == "1"
         film_hidden = int(os.getenv("VGGT_FUSE_FILM_HIDDEN", "512"))
-        self.film_blend_on = os.getenv("VGGT_FUSE_FILM_BLEND", "1") != "0"
+
+        self.film_cond_proj: Optional[nn.Module] = None
+        self.film_mlps: Optional[nn.ModuleList] = None
+        self.film_gates: Optional[torch.nn.Parameter] = None
         if self.film_enabled:
             self.film_cond_proj = nn.Conv2d(dim_in, 256, kernel_size=1, stride=1, padding=0)
             self.film_mlps = nn.ModuleList(
@@ -129,6 +137,26 @@ class DPTHead(nn.Module):
                 ]
             )
             self.film_gates = nn.Parameter(torch.zeros(len(out_channels)))
+            # Identity initialization for gamma/beta and gate bias.
+            with torch.no_grad():
+                for mlp, oc in zip(self.film_mlps, out_channels):
+                    final = mlp[-1]
+                    final.weight.zero_()
+                    final.bias.zero_()
+                    final.bias[:oc].fill_(1.0)  # gamma=1, beta=0
+
+                alpha0 = float(os.getenv("VGGT_FUSE_FILM_ALPHA", "0.0"))
+
+                def logit(p: float) -> float:
+                    eps = 1e-6
+                    p = min(max(p, eps), 1 - eps)
+                    return math.log(p / (1.0 - p))
+
+                self.film_gates.fill_(logit(alpha0))
+
+        # Hold per-level tensors for downstream consumers.
+        self.raw_pyramid: Optional[List[torch.Tensor]] = None
+        self.film_side_pyramid: Optional[List[torch.Tensor]] = None
 
     def forward(
         self,
@@ -217,20 +245,10 @@ class DPTHead(nn.Module):
 
         patch_h, patch_w = H // self.patch_size, W // self.patch_size
 
-        out = []
+        out: List[torch.Tensor] = []
+        film_side: List[Optional[torch.Tensor]] = []
+        cond_vecs: List[Optional[torch.Tensor]] = []
         dpt_idx = 0
-
-        film_cond_vecs: Dict[int, torch.Tensor] = {}
-        if getattr(self, "film_enabled", False):
-            for li, lvl in enumerate(self.intermediate_layer_idx):
-                cond_tokens = aggregated_tokens_list[lvl][:, :, patch_start_idx:]
-                if frames_start_idx is not None and frames_end_idx is not None:
-                    cond_tokens = cond_tokens[:, frames_start_idx:frames_end_idx]
-                cond_tokens = cond_tokens.contiguous().view(B * S, -1, cond_tokens.shape[-1])
-                cond_tokens = self.norm(cond_tokens)
-                cond_maps = cond_tokens.permute(0, 2, 1).reshape(B * S, cond_tokens.shape[-1], patch_h, patch_w)
-                c = self.film_cond_proj(cond_maps)
-                film_cond_vecs[li] = torch.mean(c, dim=(2, 3))
 
         for layer_idx in self.intermediate_layer_idx:
             x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
@@ -246,24 +264,64 @@ class DPTHead(nn.Module):
             x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
 
             x = self.projects[dpt_idx](x)
-            if getattr(self, "film_enabled", False):
-                c_vec = film_cond_vecs.get(dpt_idx, None)
-                if c_vec is not None:
-                    gb = self.film_mlps[dpt_idx](c_vec)
-                    gb = gb.view(B * S, 2, x.shape[1], 1, 1)
-                    gamma, beta = gb[:, 0], gb[:, 1]
-                    x_film = gamma * x + beta
-                    if self.film_blend_on:
-                        alpha = torch.sigmoid(self.film_gates[dpt_idx])
-                        x = (1.0 - alpha) * x + alpha * x_film
-                    else:
-                        x = x_film
             if self.pos_embed:
                 x = self._apply_pos_embed(x, W, H)
             x = self.resize_layers[dpt_idx](x)
 
             out.append(x)
+
+            cond_vec: Optional[torch.Tensor] = None
+            if self.film_enabled:
+                cond_tokens = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
+                if frames_start_idx is not None and frames_end_idx is not None:
+                    cond_tokens = cond_tokens[:, frames_start_idx:frames_end_idx]
+                cond_tokens = cond_tokens.contiguous().view(B * S, -1, cond_tokens.shape[-1])
+                cond_tokens = self.norm(cond_tokens)
+                cond_maps = cond_tokens.permute(0, 2, 1).reshape(B * S, cond_tokens.shape[-1], patch_h, patch_w)
+                if self.film_cond_proj is not None:
+                    cond_maps = self.film_cond_proj(cond_maps)
+                    cond_vec = cond_maps.mean(dim=(-2, -1))
+
+            cond_vecs.append(cond_vec)
+
+            if self.film_enabled and self.film_mode == "passive" and cond_vec is not None:
+                x_copy = x.clone()
+                gb = self.film_mlps[dpt_idx](cond_vec)
+                oc = x_copy.shape[1]
+                gamma, beta = gb[:, :oc], gb[:, oc:]
+                gamma = gamma.view(B * S, oc, 1, 1)
+                beta = beta.view(B * S, oc, 1, 1)
+                if self.film_blend_on:
+                    alpha = torch.sigmoid(self.film_gates[dpt_idx])
+                    x_copy = (1.0 - alpha) * x_copy + alpha * (gamma * x_copy + beta)
+                else:
+                    x_copy = gamma * x_copy + beta
+                x_copy = x_copy.contiguous()
+                film_side.append(x_copy.view(B, S, *x_copy.shape[1:]))
+            else:
+                film_side.append(None)
+
             dpt_idx += 1
+
+        self.raw_pyramid = [lvl.view(B, S, *lvl.shape[1:]).detach().clone() for lvl in out]
+        self.film_side_pyramid = (
+            [fs for fs in film_side] if any(fs is not None for fs in film_side) else None
+        )
+
+        if self.film_enabled and self.film_mode == "active":
+            for idx, cond_vec in enumerate(cond_vecs):
+                if cond_vec is None:
+                    continue
+                gb = self.film_mlps[idx](cond_vec)
+                oc = out[idx].shape[1]
+                gamma, beta = gb[:, :oc], gb[:, oc:]
+                gamma = gamma.view(B * S, oc, 1, 1)
+                beta = beta.view(B * S, oc, 1, 1)
+                if self.film_blend_on:
+                    alpha = torch.sigmoid(self.film_gates[idx])
+                    out[idx] = (1.0 - alpha) * out[idx] + alpha * (gamma * out[idx] + beta)
+                else:
+                    out[idx] = gamma * out[idx] + beta
 
         # Fuse features from multiple layers.
         out = self.scratch_forward(out)

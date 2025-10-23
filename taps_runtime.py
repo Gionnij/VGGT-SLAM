@@ -193,20 +193,24 @@ class VGGTFeatureTapper:
                     dino["p5_like"] = dino_fmap  # name it p5-like since spatial matches DPT p5 in practice
 
         # ---- record ----
-        film_info = None
-        try:
-            dh = getattr(self.model, "depth_head", None)
-            if dh is not None and getattr(dh, "film_enabled", False):
-                gates = torch.sigmoid(dh.film_gates).detach().cpu().tolist() if hasattr(dh, "film_gates") else None
-                film_info = {"enabled": True, "gates": gates}
-        except Exception:
-            film_info = {"enabled": False, "error": "inspect_failed"}
-
         rec = {
             "t": ts,
             "step": self._step,
             "sniffed_input_hw": [H_in, W_in],
-            "film": film_info,
+            "film": (lambda: (
+                None
+                if not hasattr(self.model, "depth_head")
+                else {
+                    "enabled": bool(getattr(self.model.depth_head, "film_enabled", False)),
+                    "mode": getattr(self.model.depth_head, "film_mode", None),
+                    "gates": (
+                        torch.sigmoid(self.model.depth_head.film_gates).detach().cpu().tolist()
+                        if getattr(self.model.depth_head, "film_enabled", False)
+                        and hasattr(self.model.depth_head, "film_gates")
+                        else None
+                    ),
+                }
+            ))(),
             "meta": self._meta or None,  # includes frame_ids_* if you pass them
             "dpt": {k: _tensor_stats(v) for k, v in dpt.items()} if dpt else None,
             "dino": {
