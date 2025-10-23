@@ -484,6 +484,27 @@ class Solver:
             if sem_masks is not None and sem_cls is not None:
                 # TODO: remove once semantic head is verified.
                 print("[SEM] mask_logits:", tuple(sem_masks.shape), "cls_logits:", tuple(sem_cls.shape))
+
+            ######### TODO: remove FiLM delta probe after validation.
+            dh = getattr(model, "depth_head", None)
+            raw_pyr = getattr(dh, "raw_pyramid", None) if dh is not None else None
+            film_pyr = getattr(dh, "film_side_pyramid", None) if dh is not None else None
+            if raw_pyr and film_pyr:
+                deltas = []
+                for raw_lvl, film_lvl in zip(raw_pyr, film_pyr):
+                    if raw_lvl is None or film_lvl is None:
+                        deltas.append(("none", "none"))
+                        continue
+                    rr = raw_lvl.reshape(-1, *raw_lvl.shape[-3:])
+                    ff = film_lvl.reshape(-1, *film_lvl.shape[-3:])
+                    mad = (ff - rr).abs().mean().item()
+                    num = (ff * rr).flatten(1).sum(1)
+                    den = ff.norm(dim=(1, 2, 3)) * rr.norm(dim=(1, 2, 3)) + 1e-6
+                    cos = (num / den).mean().item()
+                    deltas.append((mad, cos))
+                print("[FiLM Δ] per-level MAD/COS:", deltas)
+        ######### Remove till here
+
         except Exception:
             pass
 
