@@ -154,6 +154,15 @@ class DPTHead(nn.Module):
 
                 self.film_gates.fill_(logit(alpha0))
 
+                if os.getenv("VGGT_FUSE_FILM_TEST", "0") == "1":
+                    for mlp, oc in zip(self.film_mlps, out_channels):
+                        final = mlp[-1]
+                        noise = torch.randn_like(final.bias)
+                        final.bias[:oc] += 0.2  # gamma -> 1.2
+                        final.bias[oc:] = noise[oc:] * 0.05  # beta -> small noise
+                    noise_gate = torch.rand_like(self.film_gates)
+                    self.film_gates += (noise_gate - 0.5)
+
         # Hold per-level tensors for downstream consumers.
         self.raw_pyramid: Optional[List[torch.Tensor]] = None
         self.film_side_pyramid: Optional[List[torch.Tensor]] = None

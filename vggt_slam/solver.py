@@ -329,8 +329,8 @@ class Solver:
 
             # Add between factor.
             self.graph.add_between_factor(prior_pcd_num, new_pcd_num, H_relative, self.graph.relative_noise)
-
-            print("added between factor", prior_pcd_num, new_pcd_num, H_relative)
+            # print("added between factor", prior_pcd_num, new_pcd_num, H_relative)
+            print(f"[VGGT-SLAM] Added odometry factor {prior_pcd_num}→{new_pcd_num}")
 
         # Create and add submap.
         self.current_working_submap.set_reference_homography(H_w_submap)
@@ -358,9 +358,9 @@ class Solver:
 
             self.graph.add_between_factor(loop.detected_submap_id, loop.query_submap_id, H_relative_lc, self.graph.relative_noise)
             self.graph.increment_loop_closure() # Just for debugging and analysis, keep track of total number of loop closures
-
-            print("added loop closure factor", loop.detected_submap_id, loop.query_submap_id, H_relative_lc)
-            print("homography between nodes estimated to be", np.linalg.inv(self.map.get_submap(loop.detected_submap_id).get_reference_homography()) @ H_w_submap)
+            # print("added loop closure factor", loop.detected_submap_id, loop.query_submap_id, H_relative_lc)
+            # print("homography between nodes estimated to be", np.linalg.inv(self.map.get_submap(loop.detected_submap_id).get_reference_homography()) @ H_w_submap)
+            print(f"[VGGT-SLAM] Added loop closure {loop.detected_submap_id}↔{loop.query_submap_id}")
 
             # print("relative_pose factor added", relative_pose)
 
@@ -407,7 +407,8 @@ class Solver:
     ):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         images = load_and_preprocess_images(image_names).to(device)
-        print(f"Preprocessed images shape: {images.shape}")
+        # print(f"Preprocessed images shape: {images.shape}")
+        print(f"[VGGT-SLAM] Batch ready: tensor shape {tuple(images.shape)}")
 
         # print("Running inference...")
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -482,8 +483,9 @@ class Solver:
             sem_masks = predictions.get("sem_mask_logits")
             sem_cls = predictions.get("sem_cls_logits")
             if sem_masks is not None and sem_cls is not None:
-                # TODO: remove once semantic head is verified.
-                print("[SEM] mask_logits:", tuple(sem_masks.shape), "cls_logits:", tuple(sem_cls.shape))
+                # DEBUG: uncomment for detailed semantic head logging
+                # print("[SEM] masks:", tuple(sem_masks.shape), "cls:", tuple(sem_cls.shape))
+                pass
         except Exception:
             pass
 
@@ -491,17 +493,6 @@ class Solver:
         dh = getattr(model, "depth_head", None)
         raw_pyr = getattr(dh, "raw_pyramid", None) if dh is not None else None
         film_pyr = getattr(dh, "film_side_pyramid", None) if dh is not None else None
-        print("[FiLM Δ] raw_pyramid present?", isinstance(raw_pyr, list))
-        print("[FiLM Δ] film_pyramid present?", isinstance(film_pyr, list))
-        if raw_pyr:
-            for idx, lvl in enumerate(raw_pyr):
-                shape = lvl.shape if isinstance(lvl, torch.Tensor) else None
-                print(f"[FiLM Δ] raw[{idx}] type={type(lvl)} shape={shape}")
-        if film_pyr:
-            for idx, lvl in enumerate(film_pyr):
-                shape = lvl.shape if isinstance(lvl, torch.Tensor) else None
-                print(f"[FiLM Δ] film[{idx}] type={type(lvl)} shape={shape}")
-
         if raw_pyr and film_pyr:
             try:
                 deltas = []
@@ -518,7 +509,8 @@ class Solver:
                     den = ff_flat.norm(dim=1) * rr_flat.norm(dim=1) + 1e-6
                     cos = (num / den).mean().item()
                     deltas.append((mad, cos))
-                print("[FiLM Δ] per-level MAD/COS:", deltas)
+                # DEBUG: uncomment to inspect FiLM modulation strength
+                # print("[FiLM Δ] per-level MAD/COS:", deltas)
             except Exception as exc:
                 print("[FiLM Δ] probe failed:", exc)
         else:

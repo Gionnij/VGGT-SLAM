@@ -32,7 +32,7 @@ class PoseGraph:
 
     def add_homography(self, key, global_h):
         """Add a new homography node to the graph."""
-        print("det(global_h)", np.linalg.det(global_h))
+        # print("det(global_h)", np.linalg.det(global_h))
         key = X(key)
         if key in self.initialized_nodes:
             print(f"SL4 {key} already exists.")
