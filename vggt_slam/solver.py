@@ -483,9 +483,7 @@ class Solver:
             sem_masks = predictions.get("sem_mask_logits")
             sem_cls = predictions.get("sem_cls_logits")
             if sem_masks is not None and sem_cls is not None:
-                # DEBUG: uncomment for detailed semantic head logging
-                # print("[SEM] masks:", tuple(sem_masks.shape), "cls:", tuple(sem_cls.shape))
-                pass
+                print("[SEM] masks:", tuple(sem_masks.shape), "cls:", tuple(sem_cls.shape))
         except Exception:
             pass
 
@@ -509,8 +507,7 @@ class Solver:
                     den = ff_flat.norm(dim=1) * rr_flat.norm(dim=1) + 1e-6
                     cos = (num / den).mean().item()
                     deltas.append((mad, cos))
-                # DEBUG: uncomment to inspect FiLM modulation strength
-                # print("[FiLM Δ] per-level MAD/COS:", deltas)
+                print("[FiLM Δ] per-level MAD/COS:", deltas)
             except Exception as exc:
                 print("[FiLM Δ] probe failed:", exc)
         else:
