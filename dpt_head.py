@@ -120,6 +120,7 @@ class DPTHead(nn.Module):
         self.film_enabled = os.getenv("VGGT_FUSE_FILM", "0") == "1" and self.film_mode != "off"
         self.film_blend_on = os.getenv("VGGT_FUSE_FILM_BLEND", "1") == "1"
         film_hidden = int(os.getenv("VGGT_FUSE_FILM_HIDDEN", "512"))
+        self.film_test = os.getenv("VGGT_FUSE_FILM_TEST", "0") == "1"
 
         self.film_cond_proj: Optional[nn.Module] = None
         self.film_mlps: Optional[nn.ModuleList] = None
@@ -154,14 +155,13 @@ class DPTHead(nn.Module):
 
                 self.film_gates.fill_(logit(alpha0))
 
-                if os.getenv("VGGT_FUSE_FILM_TEST", "0") == "1":
+                if self.film_test:
                     for mlp, oc in zip(self.film_mlps, out_channels):
                         final = mlp[-1]
-                        noise = torch.randn_like(final.bias)
-                        final.bias[:oc] += 0.2  # gamma -> 1.2
-                        final.bias[oc:] = noise[oc:] * 0.05  # beta -> small noise
-                    noise_gate = torch.rand_like(self.film_gates)
-                    self.film_gates += (noise_gate - 0.5)
+                        final.weight.normal_(mean=0.0, std=0.05)
+                        final.bias.normal_(mean=0.0, std=0.05)
+                        final.bias[:oc] += 0.3  # bias gamma away from 1.0
+                    self.film_gates.normal_(mean=0.0, std=0.2)
 
         # Hold per-level tensors for downstream consumers.
         self.raw_pyramid: Optional[List[torch.Tensor]] = None
@@ -305,6 +305,8 @@ class DPTHead(nn.Module):
                     x_copy = (1.0 - alpha) * x_copy + alpha * (gamma * x_copy + beta)
                 else:
                     x_copy = gamma * x_copy + beta
+                if self.film_test:
+                    x_copy = 1.3 * x_copy + 0.05 * torch.randn_like(x_copy)
                 x_copy = x_copy.contiguous()
                 film_side.append(x_copy.view(B, S, *x_copy.shape[1:]))
             else:
@@ -331,6 +333,8 @@ class DPTHead(nn.Module):
                     out[idx] = (1.0 - alpha) * out[idx] + alpha * (gamma * out[idx] + beta)
                 else:
                     out[idx] = gamma * out[idx] + beta
+                if self.film_test:
+                    out[idx] = 1.3 * out[idx] + 0.05 * torch.randn_like(out[idx])
 
         # Fuse features from multiple layers.
         out = self.scratch_forward(out)
