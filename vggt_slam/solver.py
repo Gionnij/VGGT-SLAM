@@ -512,8 +512,10 @@ class Solver:
                     rr = raw_lvl.reshape(-1, *raw_lvl.shape[-3:]).detach()
                     ff = film_lvl.reshape(-1, *film_lvl.shape[-3:]).detach()
                     mad = (ff - rr).abs().mean().item()
-                    num = (ff * rr).flatten(1).sum(1)
-                    den = ff.norm(dim=(1, 2, 3)) * rr.norm(dim=(1, 2, 3)) + 1e-6
+                    rr_flat = rr.flatten(1)
+                    ff_flat = ff.flatten(1)
+                    num = (ff_flat * rr_flat).sum(1)
+                    den = ff_flat.norm(dim=1) * rr_flat.norm(dim=1) + 1e-6
                     cos = (num / den).mean().item()
                     deltas.append((mad, cos))
                 print("[FiLM Δ] per-level MAD/COS:", deltas)
