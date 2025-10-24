@@ -491,6 +491,17 @@ class Solver:
         dh = getattr(model, "depth_head", None)
         raw_pyr = getattr(dh, "raw_pyramid", None) if dh is not None else None
         film_pyr = getattr(dh, "film_side_pyramid", None) if dh is not None else None
+        print("[FiLM Δ] raw_pyramid present?", isinstance(raw_pyr, list))
+        print("[FiLM Δ] film_pyramid present?", isinstance(film_pyr, list))
+        if raw_pyr:
+            for idx, lvl in enumerate(raw_pyr):
+                shape = lvl.shape if isinstance(lvl, torch.Tensor) else None
+                print(f"[FiLM Δ] raw[{idx}] type={type(lvl)} shape={shape}")
+        if film_pyr:
+            for idx, lvl in enumerate(film_pyr):
+                shape = lvl.shape if isinstance(lvl, torch.Tensor) else None
+                print(f"[FiLM Δ] film[{idx}] type={type(lvl)} shape={shape}")
+
         if raw_pyr and film_pyr:
             try:
                 deltas = []
