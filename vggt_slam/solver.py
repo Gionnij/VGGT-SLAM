@@ -464,7 +464,7 @@ class Solver:
 
         try:
             with torch.no_grad():
-                with torch.cuda.amp.autocast(dtype=dtype):
+                with torch.amp.autocast(device_type="cuda", dtype=dtype):
                     predictions = model(images)
         finally:
             if trace_sink is not None:
