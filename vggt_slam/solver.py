@@ -509,16 +509,16 @@ class Solver:
                     if raw_lvl is None or film_lvl is None:
                         deltas.append(("none", "none"))
                         continue
-                    rr = raw_lvl.reshape(-1, *raw_lvl.shape[-3:])
-                    ff = film_lvl.reshape(-1, *film_lvl.shape[-3:])
+                    rr = raw_lvl.reshape(-1, *raw_lvl.shape[-3:]).detach()
+                    ff = film_lvl.reshape(-1, *film_lvl.shape[-3:]).detach()
                     mad = (ff - rr).abs().mean().item()
                     num = (ff * rr).flatten(1).sum(1)
                     den = ff.norm(dim=(1, 2, 3)) * rr.norm(dim=(1, 2, 3)) + 1e-6
                     cos = (num / den).mean().item()
                     deltas.append((mad, cos))
                 print("[FiLM Δ] per-level MAD/COS:", deltas)
-            except Exception:
-                print("[FiLM Δ] probe failed")
+            except Exception as exc:
+                print("[FiLM Δ] probe failed:", exc)
         else:
             print("[FiLM Δ] pyramid unavailable (raw or FiLM missing)")
 
