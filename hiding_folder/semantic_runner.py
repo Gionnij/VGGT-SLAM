@@ -33,8 +33,9 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
         return
 
     pyramid: Optional[List[torch.Tensor]] = getattr(depth_head, "film_side_pyramid", None)
-    if pyramid is None:
-        pyramid = getattr(depth_head, "raw_pyramid", None)
+    # TODO: re-enable raw pyramid fallback after FiLM/sem head validation.
+    # if pyramid is None:
+    #     pyramid = getattr(depth_head, "raw_pyramid", None)
 
     if not pyramid or any(level is None for level in pyramid):
         return

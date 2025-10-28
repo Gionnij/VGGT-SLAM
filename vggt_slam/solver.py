@@ -484,6 +484,24 @@ class Solver:
             sem_cls = predictions.get("sem_cls_logits")
             if sem_masks is not None and sem_cls is not None:
                 print("[SEM] masks:", tuple(sem_masks.shape), "cls:", tuple(sem_cls.shape))
+                # Quick numeric probe so we know tensors are non-trivial.
+                try:
+                    mask_mean = float(sem_masks.mean().item())
+                    mask_std = float(sem_masks.std().item())
+                    cls_scores = sem_cls.softmax(dim=-1)
+                    top_scores = cls_scores.max(dim=-1).values
+                    print(
+                        "[SEM stats] mask mean/std:",
+                        f"{mask_mean:.4f}",
+                        f"{mask_std:.4f}",
+                        "cls max avg:",
+                        f"{float(top_scores.mean().item()):.4f}",
+                        "cls max min/max:",
+                        f"{float(top_scores.min().item()):.4f}",
+                        f"{float(top_scores.max().item()):.4f}",
+                    )
+                except Exception:
+                    print("[SEM stats] probe failed")
         except Exception:
             pass
 
