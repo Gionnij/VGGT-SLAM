@@ -19,6 +19,7 @@ from vggt_slam.map import GraphMap
 from vggt_slam.submap import Submap
 from vggt_slam.h_solve import ransac_projective
 from vggt_slam.gradio_viewer import TrimeshViewer
+from pipeline_check import get_pipeline_logger
 
 def color_point_cloud_by_confidence(pcd, confidence, cmap='viridis'):
     """
@@ -409,6 +410,15 @@ class Solver:
         images = load_and_preprocess_images(image_names).to(device)
         # print(f"Preprocessed images shape: {images.shape}")
         print(f"[VGGT-SLAM] Batch ready: tensor shape {tuple(images.shape)}")
+        pipeline_logger = get_pipeline_logger()
+        if pipeline_logger:
+            pipeline_logger.log(
+                "VGGT",
+                "Window tensor prepared",
+                expected="[B,S,3,H,W]",
+                observed=str(tuple(images.shape)),
+                status="ok",
+            )
 
         # print("Running inference...")
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -500,8 +510,30 @@ class Solver:
                         f"{float(top_scores.min().item()):.4f}",
                         f"{float(top_scores.max().item()):.4f}",
                     )
+                    if pipeline_logger:
+                        pipeline_logger.log(
+                            "SEMHEAD",
+                            "Semantic logits emitted",
+                            expected="mask (B,S,Q,H,W), cls (B,S,Q,C)",
+                            observed=(
+                                f"mask {tuple(sem_masks.shape)}, cls {tuple(sem_cls.shape)}, "
+                                f"mask mean {mask_mean:.4f} std {mask_std:.4f}"
+                            ),
+                            status="ok",
+                        )
                 except Exception:
                     print("[SEM stats] probe failed")
+                    if pipeline_logger:
+                        pipeline_logger.log("SEMHEAD", "Stat probe failed", status="warn")
+            else:
+                if pipeline_logger:
+                    pipeline_logger.log(
+                        "SEMHEAD",
+                        "Semantic logits missing",
+                        expected="Outputs when VGGT_SEMANTIC_HEAD=1",
+                        observed="None",
+                        status="warn",
+                    )
         except Exception:
             pass
 
@@ -509,6 +541,19 @@ class Solver:
         dh = getattr(model, "depth_head", None)
         raw_pyr = getattr(dh, "raw_pyramid", None) if dh is not None else None
         film_pyr = getattr(dh, "film_side_pyramid", None) if dh is not None else None
+        if pipeline_logger and dh is not None:
+            film_enabled = getattr(dh, "film_enabled", False)
+            gates = getattr(dh, "film_gates", None)
+            observed_gates = None
+            if gates is not None:
+                observed_gates = [float(x) for x in torch.sigmoid(gates.detach()).cpu().tolist()]  # type: ignore[arg-type]
+            pipeline_logger.log(
+                "FiLM",
+                "FiLM configuration",
+                expected="Passive FiLM with gates",
+                observed=str({"enabled": film_enabled, "gates": observed_gates}),
+                status="ok" if film_enabled else "warn",
+            )
         if raw_pyr and film_pyr:
             try:
                 deltas = []
@@ -526,10 +571,28 @@ class Solver:
                     cos = (num / den).mean().item()
                     deltas.append((mad, cos))
                 print("[FiLM Δ] per-level MAD/COS:", deltas)
+                if pipeline_logger:
+                    pipeline_logger.log(
+                        "FiLM",
+                        "FiLM side pyramid available",
+                        expected="Non-zero deltas",
+                        observed=str(deltas),
+                        status="ok",
+                    )
             except Exception as exc:
                 print("[FiLM Δ] probe failed:", exc)
+                if pipeline_logger:
+                    pipeline_logger.log("FiLM", "Probe failed", observed=str(exc), status="warn")
         else:
             print("[FiLM Δ] pyramid unavailable (raw or FiLM missing)")
+            if pipeline_logger:
+                pipeline_logger.log(
+                    "FiLM",
+                    "FiLM side pyramid unavailable",
+                    expected="film_side_pyramid populated",
+                    observed="missing",
+                    status="warn",
+                )
 
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         predictions["extrinsic"] = extrinsic
