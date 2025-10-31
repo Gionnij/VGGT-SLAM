@@ -227,6 +227,10 @@ prior2former_env () {
   local REQ_BASE="${VGGT_SLAM_ROOT}/Prior2Former/Prior2Former/requirements"
   local REQ_FILE="${REQ_BASE}/requirements.txt"
   local SENTINEL="${VENV_PATH}/.deps_installed"
+  local TORCH_VERSION="2.1.2"
+  local TORCHVISION_VERSION="0.16.2"
+  local PANOPTIC_REPO="https://github.com/cocodataset/panopticapi.git"
+  local DETECTRON_REPO="https://github.com/facebookresearch/detectron2.git"
 
   if [ ! -d "${VENV_PATH}" ]; then
     echo "[prior2former_env] Creating venv at ${VENV_PATH}"
@@ -235,10 +239,32 @@ prior2former_env () {
 
   if [ ! -f "${SENTINEL}" ]; then
     echo "[prior2former_env] Installing Prior2Former dependencies (first-run setup)."
-    "${VENV_PATH}/bin/python" -m pip install --upgrade pip setuptools wheel
-    "${VENV_PATH}/bin/python" -m pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu118
+    if ! "${VENV_PATH}/bin/python" -m pip install --upgrade pip setuptools wheel; then
+      echo "[prior2former_env] pip bootstrap failed." >&2
+      return 1
+    fi
+    if ! "${VENV_PATH}/bin/python" -m pip install "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" --extra-index-url https://download.pytorch.org/whl/cu118; then
+      echo "[prior2former_env] Failed to install torch/torchvision." >&2
+      return 1
+    fi
+    if ! "${VENV_PATH}/bin/python" -m pip install "git+${PANOPTIC_REPO}"; then
+      echo "[prior2former_env] Failed to install panopticapi." >&2
+      return 1
+    fi
+    if ! "${VENV_PATH}/bin/python" -m pip install --no-build-isolation "git+${DETECTRON_REPO}"; then
+      echo "[prior2former_env] Failed to install detectron2." >&2
+      return 1
+    fi
     if [ -f "${REQ_FILE}" ]; then
-      "${VENV_PATH}/bin/python" -m pip install -r "${REQ_FILE}"
+      local TMP_REQ
+      TMP_REQ="$(mktemp)"
+      grep -v '^git+' "${REQ_FILE}" > "${TMP_REQ}"
+      if ! "${VENV_PATH}/bin/python" -m pip install -r "${TMP_REQ}"; then
+        rm -f "${TMP_REQ}"
+        echo "[prior2former_env] Failed to install pip requirements." >&2
+        return 1
+      fi
+      rm -f "${TMP_REQ}"
     else
       echo "[prior2former_env] Warning: requirements file not found at ${REQ_FILE}" >&2
     fi
