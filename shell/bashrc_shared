@@ -1,0 +1,234 @@
+# shellcheck shell=bash
+# Shared VGGT-SLAM shell helpers and environment setup.
+
+# Resolve repository root relative to this file.
+VGGT_SLAM_ROOT="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
+if [ -z "${VGGT_SLAM_ROOT}" ]; then
+  echo "[bashrc_shared] Unable to resolve repository root." >&2
+  return 1 2>/dev/null || exit 1
+fi
+export VGGT_SLAM_ROOT
+
+# Convenience path to shared virtual environments.
+export VGGT_VENV_DIR="${HOME}/.venvs"
+
+# Load common HPC modules when available.
+if command -v module >/dev/null 2>&1; then
+  module load slurm/utils python/3.10.7 nvidia/cuda-11.8 2>/dev/null || true
+fi
+
+# Library / Python paths for VGGT-SLAM and dependencies.
+export LD_LIBRARY_PATH="${VGGT_SLAM_ROOT}/gtsam/build/lib:${LD_LIBRARY_PATH}"
+export PYTHONPATH="${VGGT_SLAM_ROOT}:${PYTHONPATH}"
+export PYTHONPATH="${VGGT_SLAM_ROOT}/salad:${PYTHONPATH}"
+
+# --- Quick setup for GPU environment ---
+gpuenv () {
+  if command -v module >/dev/null 2>&1; then
+    module purge 2>/dev/null || true
+    module load nvidia/cuda-11.8 2>/dev/null || true
+  fi
+  if [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+    conda activate scannetpp_raster 2>/dev/null || true
+  fi
+  [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && export CUDA_VISIBLE_DEVICES=0
+}
+# --- End GPU helper ---
+
+# --- Clean shell for container commands (prevents host env leaking into container) ---
+cleanenv () {
+  if command -v module >/dev/null 2>&1; then
+    module purge 2>/dev/null || true
+  fi
+  if type conda &>/dev/null; then
+    # Deactivate all nested conda environments.
+    while [[ "$(conda info --json | sed -n 's/.*\"active_prefix\": \"\(.*\)\".*/\1/p')" != "" ]]; do
+      conda deactivate || break
+    done
+  fi
+  unset PYTHONPATH
+}
+
+print_embeddings () {
+  tail -f "${VGGT_SLAM_ROOT}/tap_logs/taps.jsonl"
+}
+
+pub_images () {
+  cleanenv 2>/dev/null || true
+  if command -v module >/dev/null 2>&1; then
+    module load singularity/3.9.5 2>/dev/null || true
+  fi
+  local SIF="${HOME}/containers/ros_humble_perception.sif"
+
+  local LOOP_FLAG=""
+  if [[ "${1:-}" == "loop" ]]; then
+    LOOP_FLAG="--loop"
+    echo "[pub_images] Loop mode enabled — images will stream continuously."
+  else
+    echo "[pub_images] One-shot mode — will stop after the last image."
+  fi
+
+  singularity exec --cleanenv "${SIF}" bash -lc "
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    export FASTDDS_DEFAULT_PROFILES_FILE=${HOME}/.fastdds_unicast_runtime.xml
+    export FASTRTPS_DEFAULT_PROFILES_FILE=${HOME}/.fastdds_unicast_runtime.xml
+
+    python3 ${VGGT_SLAM_ROOT}/image_publisher.py \
+      --folder /home/s2984792/scannetpp/data/5a269ba6fe/dslr/resized_undistorted_images \
+      --hz 2.0 \
+      --image_topic /camera/image_color \
+      --info_topic  /camera/camera_info \
+      ${LOOP_FLAG}
+  "
+}
+
+# --- ScanNet++ GPU env setup ---
+scannetpp_env () {
+  if [ -n "${VIRTUAL_ENV:-}" ] && command -v deactivate >/dev/null 2>&1; then
+    deactivate || true
+  fi
+
+  if command -v module >/dev/null 2>&1; then
+    module purge 2>/dev/null || true
+    module load nvidia/cuda-11.8 2>/dev/null || true
+  fi
+
+  if [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+    conda activate scannetpp_raster 2>/dev/null || true
+  fi
+
+  export PYTHONNOUSERSITE=1
+
+  mkdir -p "${HOME}/pydeps" 2>/dev/null
+  ln -sfn "${HOME}/src/scannetpp-toolbox" "${HOME}/pydeps/scannetpp"
+  export PYTHONPATH="${HOME}/src/scannetpp-toolbox:${HOME}/pydeps:${PYTHONPATH}"
+
+  [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && export CUDA_VISIBLE_DEVICES=0
+
+  export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+
+  python - <<'PY'
+import torch
+print("ScanNet++ env OK — torch", torch.__version__, "cuda", torch.version.cuda, "gpu?", torch.cuda.is_available())
+PY
+}
+# --- end ScanNet++ helper ---
+
+export SINGULARITYENV_PYTHONWARNINGS="ignore:xFormers is available:UserWarning,ignore:xFormers is not available:UserWarning"
+
+run_vggt () {
+  cleanenv 2>/dev/null || true
+  if command -v module >/dev/null 2>&1; then
+    module load singularity/3.9.5 2>/dev/null || true
+  fi
+
+  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
+  CPU_IP="130.89.6.254"
+
+  cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="unicast_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>udp_only</transport_id></userTransports>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>${CPU_IP}</address></udpv4></locator>
+          <locator><udpv4><address>${GPU_IP}</address></udpv4></locator>
+        </initialPeersList>
+        <avoid_builtin_multicast>true</avoid_builtin_multicast>
+      </builtin>
+      <throughputController>
+        <bytesPerPeriod>2097152</bytesPerPeriod>
+        <periodMillisecs>0</periodMillisecs>
+      </throughputController>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+
+  local SIF="${HOME}/containers/ros_humble_perception.sif"
+  local binds=( --bind "${VGGT_VENV_DIR}:/venvs" --bind "${VGGT_SLAM_ROOT}:${VGGT_SLAM_ROOT}" )
+  [ -d "${HOME}/models" ] && binds+=( --bind "${HOME}/models:${HOME}/models" )
+
+  singularity exec --nv --cleanenv "${binds[@]}" "${SIF}" bash -lc '
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+
+    export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:$PYTHONPATH"
+
+    export VGGT_FUSE_FILM=1
+    export VGGT_FUSE_FILM_BLEND=0
+    export VGGT_FUSE_FILM_MODE=passive
+    export VGGT_FUSE_FILM_HIDDEN=512
+    export VGGT_FUSE_FILM_ALPHA=0.30
+    export VGGT_FUSE_FILM_TEST=1
+
+    export VGGT_SEMANTIC_HEAD=1
+    export VGGT_SEM_CLASSES=20
+    export VGGT_SEM_QUERIES=50
+
+    export VGGT_PIPELINE_CHECK=1
+    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
+
+    /venvs/vggt/bin/python - <<'"'"'PY'"'"'
+import sys, torch, os
+print("python:", sys.executable)
+print("CUDA:", torch.version.cuda, "GPU?", torch.cuda.is_available())
+print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
+print("FiLM blend  :", os.getenv("VGGT_FUSE_FILM_BLEND"))
+print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
+PY
+
+    /venvs/vggt/bin/python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
+      --ros_image_topic /camera/image_color \
+      --ros_info_topic  /camera/camera_info \
+      --window_size 15 --overlapping_window_size 1 \
+      --target_fps 2.0 --ros2_queue_size 60 \
+      --local_model "$HOME/models/VGGT-1B/model.pt" \
+      --log_results
+  '
+}
+
+# --- Prior2Former helper ---
+prior2former_env () {
+  cleanenv 2>/dev/null || true
+
+  if command -v module >/dev/null 2>&1; then
+    module load python/3.10.7 nvidia/cuda-11.8 2>/dev/null || true
+  fi
+
+  local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
+  if [ ! -d "${VENV_PATH}" ]; then
+    echo "[prior2former_env] Creating venv at ${VENV_PATH}"
+    python3 -m venv "${VENV_PATH}"
+  fi
+
+  # shellcheck disable=SC1090
+  source "${VENV_PATH}/bin/activate"
+
+  export PYTHONPATH="${VGGT_SLAM_ROOT}/Prior2Former:${PYTHONPATH}"
+  echo "[prior2former_env] Activated Prior2Former environment."
+}
+# --- end Prior2Former helper ---
