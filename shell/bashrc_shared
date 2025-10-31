@@ -215,14 +215,34 @@ PY
 prior2former_env () {
   cleanenv 2>/dev/null || true
 
+  if [ -n "${VIRTUAL_ENV:-}" ] && command -v deactivate >/dev/null 2>&1; then
+    deactivate || true
+  fi
+
   if command -v module >/dev/null 2>&1; then
     module load python/3.10.7 nvidia/cuda-11.8 2>/dev/null || true
   fi
 
   local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
+  local REQ_BASE="${VGGT_SLAM_ROOT}/Prior2Former/Prior2Former/requirements"
+  local REQ_FILE="${REQ_BASE}/requirements.txt"
+  local SENTINEL="${VENV_PATH}/.deps_installed"
+
   if [ ! -d "${VENV_PATH}" ]; then
     echo "[prior2former_env] Creating venv at ${VENV_PATH}"
     python3 -m venv "${VENV_PATH}"
+  fi
+
+  if [ ! -f "${SENTINEL}" ]; then
+    echo "[prior2former_env] Installing Prior2Former dependencies (first-run setup)."
+    "${VENV_PATH}/bin/python" -m pip install --upgrade pip setuptools wheel
+    "${VENV_PATH}/bin/python" -m pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu118
+    if [ -f "${REQ_FILE}" ]; then
+      "${VENV_PATH}/bin/python" -m pip install -r "${REQ_FILE}"
+    else
+      echo "[prior2former_env] Warning: requirements file not found at ${REQ_FILE}" >&2
+    fi
+    touch "${SENTINEL}"
   fi
 
   # shellcheck disable=SC1090
