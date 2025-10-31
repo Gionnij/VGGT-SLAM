@@ -1,0 +1,326 @@
+# ~/.bashrc: executed by bash(1) for non-login shells.
+# see /usr/share/doc/bash/examples/startup-files (in the package bash-doc)
+# for examples
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# don't put duplicate lines or lines starting with space in the history.
+# See bash(1) for more options
+HISTCONTROL=ignoreboth
+
+# append to the history file, don't overwrite it
+shopt -s histappend
+
+# for setting history length see HISTSIZE and HISTFILESIZE in bash(1)
+HISTSIZE=1000
+HISTFILESIZE=2000
+
+# check the window size after each command and, if necessary,
+# update the values of LINES and COLUMNS.
+shopt -s checkwinsize
+
+# If set, the pattern "**" used in a pathname expansion context will
+# match all files and zero or more directories and subdirectories.
+#shopt -s globstar
+
+# make less more friendly for non-text input files, see lesspipe(1)
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
+
+# set variable identifying the chroot you work in (used in the prompt below)
+if [ -z "${debian_chroot:-}" ] && [ -r /etc/debian_chroot ]; then
+    debian_chroot=$(cat /etc/debian_chroot)
+fi
+
+# set a fancy prompt (non-color, unless we know we "want" color)
+case "$TERM" in
+    xterm-color|*-256color) color_prompt=yes;;
+esac
+
+# uncomment for a colored prompt, if the terminal has the capability; turned
+# off by default to not distract the user: the focus in a terminal window
+# should be on the output of commands, not on the prompt
+#force_color_prompt=yes
+
+if [ -n "$force_color_prompt" ]; then
+    if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
+	# We have color support; assume it's compliant with Ecma-48
+	# (ISO/IEC-6429). (Lack of such support is extremely rare, and such
+	# a case would tend to support setf rather than setaf.)
+	color_prompt=yes
+    else
+	color_prompt=
+    fi
+fi
+
+if [ "$color_prompt" = yes ]; then
+    PS1='${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
+fi
+unset color_prompt force_color_prompt
+
+# If this is an xterm set the title to user@host:dir
+case "$TERM" in
+xterm*|rxvt*)
+    PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
+    ;;
+*)
+    ;;
+esac
+
+# enable color support of ls and also add handy aliases
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    #alias dir='dir --color=auto'
+    #alias vdir='vdir --color=auto'
+
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# colored GCC warnings and errors
+#export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+
+# some more ls aliases
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+# Add an "alert" alias for long running commands.  Use like so:
+#   sleep 10; alert
+alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
+
+# Alias definitions.
+# You may want to put all your additions into a separate file like
+# ~/.bash_aliases, instead of adding them here directly.
+# See /usr/share/doc/bash-doc/examples in the bash-doc package.
+
+if [ -f ~/.bash_aliases ]; then
+    . ~/.bash_aliases
+fi
+
+# enable programmable completion features (you don't need to enable
+# this, if it's already enabled in /etc/bash.bashrc and /etc/profile
+# sources /etc/bash.bashrc).
+if ! shopt -oq posix; then
+  if [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+  elif [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+  fi
+fi
+
+# load following modules:
+module load slurm/utils python/3.10.7 nvidia/cuda-11.8
+
+export LD_LIBRARY_PATH=$HOME/src/VGGT-SLAM/gtsam/build/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$HOME/src/VGGT-SLAM/gtsam/build/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=$HOME/src/VGGT-SLAM:$PYTHONPATH
+export PYTHONPATH=$HOME/src/VGGT-SLAM/salad:$PYTHONPATH
+
+# --- Quick setup for GPU environment ---
+gpuenv () {
+  module purge
+  module load nvidia/cuda-11.8
+  source ~/miniconda3/etc/profile.d/conda.sh
+  conda activate scannetpp_raster
+  [ -z "$CUDA_VISIBLE_DEVICES" ] && export CUDA_VISIBLE_DEVICES=0
+}
+# --- End GPU helper ---
+
+# --- Clean shell for container commands (prevents host env leaking into container) ---
+cleanenv () {
+  # unload modules + deactivate conda if currently active
+  module purge 2>/dev/null
+  if type conda &>/dev/null; then
+    while [[ "$(conda info --json | sed -n 's/.*"active_prefix": "\(.*\)".*/\1/p')" != "" ]]; do conda deactivate; done
+  fi
+  unset PYTHONPATH
+}
+
+print_embeddings () {
+  tail -f tap_logs/taps.jsonl
+}
+
+pub_images () {
+  cleanenv 2>/dev/null || true
+  module load singularity/3.9.5
+  local SIF="$HOME/containers/ros_humble_perception.sif"
+
+  # optional argument: "loop" enables --loop flag
+  local LOOP_FLAG=""
+  if [[ "$1" == "loop" ]]; then
+    LOOP_FLAG="--loop"
+    echo "[pub_images] Loop mode enabled — images will stream continuously."
+  else
+    echo "[pub_images] One-shot mode — will stop after the last image."
+  fi
+
+  singularity exec --cleanenv "$SIF" bash -lc "
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    export FASTDDS_DEFAULT_PROFILES_FILE='$HOME/.fastdds_unicast_runtime.xml'
+    export FASTRTPS_DEFAULT_PROFILES_FILE='$HOME/.fastdds_unicast_runtime.xml'
+
+    python3 \$HOME/src/VGGT-SLAM/image_publisher.py \
+      --folder /home/s2984792/scannetpp/data/5a269ba6fe/dslr/resized_undistorted_images \
+      --hz 2.0 \
+      --image_topic /camera/image_color \
+      --info_topic  /camera/camera_info \
+      $LOOP_FLAG
+  "
+}
+
+
+
+# --- ScanNet++ GPU env setup ---
+scannetpp_env () {
+  # leave any virtualenv silently (if present)
+  if [ -n "$VIRTUAL_ENV" ] && command -v deactivate >/dev/null 2>&1; then deactivate; fi
+
+  # reset modules & load CUDA 11.8
+  module purge
+  module load nvidia/cuda-11.8
+
+  # bring conda in
+  . "$HOME/miniconda3/etc/profile.d/conda.sh"
+  conda activate scannetpp_raster
+
+  # keep host user-site from shadowing the env
+  export PYTHONNOUSERSITE=1
+
+  # clean leftovers from VGGT/ROS runs (harmless if unset)
+  unset ROS_DOMAIN_ID RMW_IMPLEMENTATION ROS_LOCALHOST_ONLY FASTDDS_DEFAULT_PROFILES_FILE FASTRTPS_DEFAULT_PROFILES_FILE
+
+  # set Python paths for the toolbox
+  mkdir -p "$HOME/pydeps" 2>/dev/null
+  ln -sfn "$HOME/src/scannetpp-toolbox" "$HOME/pydeps/scannetpp"
+  export PYTHONPATH="$HOME/src/scannetpp-toolbox:$HOME/pydeps:$PYTHONPATH"
+
+  # make sure we see at least one GPU in single-GPU sessions
+  [ -z "$CUDA_VISIBLE_DEVICES" ] && export CUDA_VISIBLE_DEVICES=0
+
+  # keep native libs calm on HPC
+  export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+
+  # quick sanity banner
+  python - <<'PY'
+import torch
+print("ScanNet++ env OK — torch", torch.__version__, "cuda", torch.version.cuda, "gpu?", torch.cuda.is_available())
+PY
+}
+# --- end ScanNet++ helper ---
+export SINGULARITYENV_PYTHONWARNINGS="ignore:xFormers is available:UserWarning,ignore:xFormers is not available:UserWarning"
+
+
+
+
+
+
+
+
+run_vggt () {
+  cleanenv 2>/dev/null || true
+  module load singularity/3.9.5
+
+  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
+  CPU_IP="130.89.6.254"
+
+  cat > "$HOME/.fastdds_unicast_runtime.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="unicast_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>udp_only</transport_id></userTransports>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>${CPU_IP}</address></udpv4></locator>
+          <locator><udpv4><address>${GPU_IP}</address></udpv4></locator>
+        </initialPeersList>
+        <avoid_builtin_multicast>true</avoid_builtin_multicast>
+      </builtin>
+      <throughputController>
+        <bytesPerPeriod>2097152</bytesPerPeriod>
+        <periodMillisecs>0</periodMillisecs>
+      </throughputController>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+
+  local SIF="$HOME/containers/ros_humble_perception.sif"
+  local binds=( --bind "$HOME/.venvs:/venvs" --bind "$HOME/src/VGGT-SLAM:$HOME/src/VGGT-SLAM" )
+  [ -d "$HOME/models" ] && binds+=( --bind "$HOME/models:$HOME/models" )
+
+  singularity exec --nv --cleanenv "${binds[@]}" "$SIF" bash -lc '
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+
+    # --- ROS networking ---
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+
+    # --- Python path to your sources ---
+    export PYTHONPATH="$HOME/vggt:$HOME/src/VGGT-SLAM:$HOME/src/VGGT-SLAM/salad:$PYTHONPATH"
+
+    # --- FiLM: turn it ON (recommended defaults) ---
+    export VGGT_FUSE_FILM=1          # 1=enable FiLM fusion inside DPTHead (multi-scale)
+    export VGGT_FUSE_FILM_BLEND=0    # 1=use learnable blend gate per level; 0=pure FiLM (stronger effect)
+    export VGGT_FUSE_FILM_MODE=passive
+    export VGGT_FUSE_FILM_HIDDEN=512 # hidden dim of the small FiLM MLP (sane default)
+    export VGGT_FUSE_FILM_ALPHA=0.30
+    export VGGT_FUSE_FILM_TEST=1
+
+    # Turn on the external semantic head
+    export VGGT_SEMANTIC_HEAD=1
+    export VGGT_SEM_CLASSES=20
+    export VGGT_SEM_QUERIES=50
+
+    # Turn on file debugging
+    export VGGT_PIPELINE_CHECK=1
+    export VGGT_PIPELINE_CHECK_PATH=debug/pipeline_check.txt
+
+
+    # (Optional) taps: save tiny tensor samples per step
+    # export TAP_SAVE_TENSORS=1
+
+    # Sanity print
+    /venvs/vggt/bin/python - <<'"PY"'
+import sys, torch, os
+print("python:", sys.executable)
+print("CUDA:", torch.version.cuda, "GPU?", torch.cuda.is_available())
+print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
+print("FiLM blend  :", os.getenv("VGGT_FUSE_FILM_BLEND"))
+print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
+PY
+
+    # Run VGGT-SLAM live
+    /venvs/vggt/bin/python "$HOME/src/VGGT-SLAM/main_live_stream.py" --live \
+      --ros_image_topic /camera/image_color \
+      --ros_info_topic  /camera/camera_info \
+      --window_size 15 --overlapping_window_size 1 \
+      --target_fps 2.0 --ros2_queue_size 60 \
+      --local_model "$HOME/models/VGGT-1B/model.pt" \
+      --log_results
+      # add --vis_map at the *end* (on a new line) if you want visualization
+  '
+}
