@@ -61,13 +61,35 @@ pub_images () {
     module load singularity/3.9.5 2>/dev/null || true
   fi
   local SIF="${HOME}/containers/ros_humble_perception.sif"
+  local REPO_ROOT="${VGGT_SLAM_ROOT}"
 
-  # Ensure DDS transport config matches the current node pair.
+  # Pass DDS peer addresses through the container boundary.
   local GPU_IP
   GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
   local CPU_IP="130.89.6.254"
-  cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
-<?xml version="1.0" encoding="UTF-8" ?>
+
+  local LOOP_FLAG=""
+  if [[ "${1:-}" == "loop" ]]; then
+    LOOP_FLAG="--loop"
+    echo "[pub_images] Loop mode enabled — images will stream continuously."
+  else
+    echo "[pub_images] One-shot mode — will stop after the last image."
+  fi
+
+  PUB_IMAGES_CPU_IP=\"${CPU_IP}\" PUB_IMAGES_GPU_IP=\"${GPU_IP}\" singularity exec --cleanenv \"${SIF}\" bash -lc '
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    export FASTDDS_DEFAULT_PROFILES_FILE=$HOME/.fastdds_unicast_runtime.xml
+    export FASTRTPS_DEFAULT_PROFILES_FILE=$HOME/.fastdds_unicast_runtime.xml
+    export VGGT_SLAM_ROOT="'"${REPO_ROOT}"'"
+
+    CPU_IP="${PUB_IMAGES_CPU_IP}"
+    GPU_IP="${PUB_IMAGES_GPU_IP}"
+    cat > "$HOME/.fastdds_unicast_runtime.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
   <transport_descriptors>
     <transport_descriptor>
@@ -95,30 +117,13 @@ pub_images () {
 </profiles>
 EOF
 
-  local LOOP_FLAG=""
-  if [[ "${1:-}" == "loop" ]]; then
-    LOOP_FLAG="--loop"
-    echo "[pub_images] Loop mode enabled — images will stream continuously."
-  else
-    echo "[pub_images] One-shot mode — will stop after the last image."
-  fi
-
-  singularity exec --cleanenv "${SIF}" bash -lc "
-    set -eE -o pipefail
-    set +u; source /opt/ros/humble/setup.bash; set -u
-    export ROS_DOMAIN_ID=42
-    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-    export ROS_LOCALHOST_ONLY=0
-    export FASTDDS_DEFAULT_PROFILES_FILE=${HOME}/.fastdds_unicast_runtime.xml
-    export FASTRTPS_DEFAULT_PROFILES_FILE=${HOME}/.fastdds_unicast_runtime.xml
-
     python3 ${VGGT_SLAM_ROOT}/image_publisher.py \
       --folder /home/s2984792/scannetpp/data/5a269ba6fe/dslr/resized_undistorted_images \
       --hz 2.0 \
       --image_topic /camera/image_color \
       --info_topic  /camera/camera_info \
       ${LOOP_FLAG}
-  "
+  '
 }
 
 # --- ScanNet++ GPU env setup ---
