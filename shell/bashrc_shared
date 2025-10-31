@@ -83,16 +83,19 @@ pub_images () {
 
     CPU_IP=\"${CPU_IP}\"
     GPU_IP=\$(hostname -I | tr \" \" \"\\n\" | awk '/^10[.]/ {print; exit} END{ if(!NR) print \"127.0.0.1\" }')
-    cat > \"\$HOME/.fastdds_unicast_runtime.xml\" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    FASTDDS_FILE=\"\$HOME/.fastdds_unicast_runtime.xml\"
+    export FASTDDS_DEFAULT_PROFILES_FILE=\"\$FASTDDS_FILE\"
+    export FASTRTPS_DEFAULT_PROFILES_FILE=\"\$FASTDDS_FILE\"
+    cat > \"\$FASTDDS_FILE\" <<EOF
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<profiles xmlns=\"http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles\">
   <transport_descriptors>
     <transport_descriptor>
       <transport_id>udp_only</transport_id>
       <type>UDPv4</type>
     </transport_descriptor>
   </transport_descriptors>
-  <participant profile_name="unicast_participant" is_default_profile="true">
+  <participant profile_name=\"unicast_participant\" is_default_profile=\"true\">
     <rtps>
       <useBuiltinTransports>false</useBuiltinTransports>
       <userTransports><transport_id>udp_only</transport_id></userTransports>
@@ -111,6 +114,12 @@ pub_images () {
   </participant>
 </profiles>
 EOF
+    if [ ! -f \"\$FASTDDS_FILE\" ]; then
+      echo \"[pub_images] Failed to create \$FASTDDS_FILE\" >&2
+    else
+      echo \"[pub_images] DDS profile -> \$FASTDDS_FILE\"
+      ls -l \"\$FASTDDS_FILE\" || true
+    fi
 
     REPO_ROOT=\"\$HOME/src/VGGT-SLAM\"
     python3 \"\$REPO_ROOT\"/image_publisher.py \
