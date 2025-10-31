@@ -62,43 +62,6 @@ pub_images () {
   fi
   local SIF="${HOME}/containers/ros_humble_perception.sif"
 
-  local CPU_IP="130.89.6.254"
-  local GPU_IP
-  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
-  local FASTDDS_FILE="${HOME}/.fastdds_unicast_runtime.xml"
-  cat > "${FASTDDS_FILE}" <<EOF
-<?xml version="1.0" encoding="UTF-8" ?>
-<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
-  <transport_descriptors>
-    <transport_descriptor>
-      <transport_id>udp_only</transport_id>
-      <type>UDPv4</type>
-    </transport_descriptor>
-  </transport_descriptors>
-  <participant profile_name="unicast_participant" is_default_profile="true">
-    <rtps>
-      <useBuiltinTransports>false</useBuiltinTransports>
-      <userTransports><transport_id>udp_only</transport_id></userTransports>
-      <builtin>
-        <initialPeersList>
-          <locator><udpv4><address>${CPU_IP}</address></udpv4></locator>
-          <locator><udpv4><address>${GPU_IP}</address></udpv4></locator>
-        </initialPeersList>
-        <avoid_builtin_multicast>true</avoid_builtin_multicast>
-      </builtin>
-      <throughputController>
-        <bytesPerPeriod>2097152</bytesPerPeriod>
-        <periodMillisecs>0</periodMillisecs>
-      </throughputController>
-    </rtps>
-  </participant>
-</profiles>
-EOF
-
-  if [ ! -f "${FASTDDS_FILE}" ]; then
-    echo "[pub_images] Warning: failed to write ${FASTDDS_FILE}" >&2
-  fi
-
   local LOOP_FLAG=""
   if [[ "${1:-}" == "loop" ]]; then
     LOOP_FLAG="--loop"
@@ -116,8 +79,7 @@ EOF
     export FASTDDS_DEFAULT_PROFILES_FILE='$HOME/.fastdds_unicast_runtime.xml'
     export FASTRTPS_DEFAULT_PROFILES_FILE='$HOME/.fastdds_unicast_runtime.xml'
 
-    REPO_ROOT=\"\$HOME/src/VGGT-SLAM\"
-    python3 \"\$REPO_ROOT\"/image_publisher.py \
+    python3 $HOME/src/VGGT-SLAM/image_publisher.py \
       --folder /home/s2984792/scannetpp/data/5a269ba6fe/dslr/resized_undistorted_images \
       --hz 2.0 \
       --image_topic /camera/image_color \
