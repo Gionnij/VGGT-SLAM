@@ -1,0 +1,54 @@
+type: panoptic
+module:
+  model:
+    args:
+      losses:
+        # rgb:
+        #   name: "mse"
+        #   args:
+        #     reduction: "mean"
+        #   weight: 1
+        center:
+          name: "mse"
+          args:
+            reduction: none
+          weight: 1
+        instance:
+          name: prototype_instance
+          args:
+            spatial_clustering: False
+            bias_weight: 0.0
+            mixture_dist: normal
+            hard_pixel_fraction: 1.0
+            predict_sigmas: True
+          weight: 1.0
+        discriminative:
+          name: "discriminative"
+          args:
+            margin_variance: 0.0
+            margin_distance: 1.5 # Should be at least 2*margin_variance for good clustering
+          weight: 1.0
+        semantic:
+          name: dirichlet_prior # hard_pixel_mining
+          args:
+            ignore_label: 255
+            # top_k_percent: 0.2
+            kl_weight: 0.0
+            loss_type: nll
+            mask_loss_at_ignore: True
+          weight: 1.0
+  optimizer:
+    args:
+      lr: 0.001
+    lr_scheduler: 
+      type: step
+      args:
+        gamma: 0.98
+        step_size: 1
+  post_process: {}
+    # unknown_clustering:
+    #   epsilon: 0.5
+    #   min_samples: 5
+    #   greater_distance_threshold: None
+    #   reassign_outliers: False
+

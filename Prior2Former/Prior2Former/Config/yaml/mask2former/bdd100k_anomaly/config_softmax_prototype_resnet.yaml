@@ -1,0 +1,100 @@
+module:
+  model:
+    name: mask2former
+    backbone:
+      freeze: 5
+    RESNETS:
+      WEIGHTS: "~/Experiments/model_zoo/R-50.pth"
+      DEFORM_MODULATED: false
+      DEFORM_NUM_GROUPS: 1
+      DEFORM_ON_PER_STAGE:
+      - false
+      - false
+      - false
+      - false
+      DEPTH: 50
+      NORM: SyncBN
+      NUM_GROUPS: 1
+      OUT_FEATURES:
+      - res2
+      - res3
+      - res4
+      - res5
+      RES2_OUT_CHANNELS: 256
+      RES4_DILATION: 1
+      RES5_DILATION: 1
+      RES5_MULTI_GRID:
+      - 1
+      - 1
+      - 1
+      STEM_OUT_CHANNELS: 64
+      STEM_TYPE: basic
+      STRIDE_IN_1X1: false
+      WIDTH_PER_GROUP: 64
+    DETECTIONS_PER_IMAGE: 100
+    ANCHOR_GENERATOR:
+      ANGLES:
+      - - -90
+        - 0
+        - 90
+      ASPECT_RATIOS:
+      - - 0.5
+        - 1.0
+        - 2.0
+      NAME: DefaultAnchorGenerator
+      OFFSET: 0.0
+      SIZES:
+      - - 32
+        - 64
+        - 128
+        - 256
+        - 512
+    DEVICE: cuda
+    FPN:
+      FUSE_TYPE: sum
+      IN_FEATURES: []
+      NORM: ''
+      OUT_CHANNELS: 256
+    KEYPOINT_ON: false
+    LOAD_PROPOSALS: false
+    args:
+      TRANSFORMER_DECODER_NAME: MultiScaleMaskedTransformerDecoder
+      TRANSFORMER_IN_FEATURE: multi_scale_pixel_decoder
+      losses:
+        mask:
+          name: mask2former
+          args:
+            deep_supervision: true
+            eos_coef: 0.1 #no_object_weight
+            class_weight: 2.0
+            dice_weight: 5.0
+            mask_weight: 5.0
+            dec_layers: 10
+            num_points: 12544
+            oversample_ratio: 3.0
+            importance_sample_ratio: 0.75
+          weight: 1
+    MASK_ON: false
+    META_ARCHITECTURE: MaskFormer
+    PANOPTIC_FPN:
+      COMBINE:
+        ENABLED: true
+        INSTANCES_CONFIDENCE_THRESH: 0.5
+        OVERLAP_THRESH: 0.5
+        STUFF_AREA_LIMIT: 4096
+      INSTANCE_LOSS_WEIGHT: 1.0
+    PROPOSAL_GENERATOR:
+      MIN_SIZE: 0
+      NAME: RPN
+  optimizer:
+    name: adamw
+    args:
+      lr: 0.0001
+      weight_decay: 0.05
+    backbone_lr_factor: 0.1
+    lr_scheduler: 
+      type: polynomial
+      args:
+        #max_epochs: 5 # set as 100
+        power: 0.9
+        total_iters: 450

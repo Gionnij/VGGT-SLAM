@@ -1,0 +1,104 @@
+CUDNN_BENCHMARK: false
+
+# DATALOADER:
+#   ASPECT_RATIO_GROUPING: true
+#   FILTER_EMPTY_ANNOTATIONS: true
+#   NUM_WORKERS: 4
+#   REPEAT_SQRT: true
+#   REPEAT_THRESHOLD: 0.0
+#   SAMPLER_TRAIN: TrainingSampler
+# DATASETS:
+#   PRECOMPUTED_PROPOSAL_TOPK_TEST: 1000
+#   PRECOMPUTED_PROPOSAL_TOPK_TRAIN: 2000
+#   PROPOSAL_FILES_TEST: []
+#   PROPOSAL_FILES_TRAIN: []
+#   TEST:
+#   - cityscapes_fine_sem_seg_val
+#   TRAIN:
+#   - cityscapes_fine_sem_seg_train
+module:
+  model:
+    name: mask2former
+    class_embed:
+      name: linear
+      args: {}
+    DETECTIONS_PER_IMAGE: 100
+    ANCHOR_GENERATOR:
+      ANGLES:
+      - - -90
+        - 0
+        - 90
+      ASPECT_RATIOS:
+      - - 0.5
+        - 1.0
+        - 2.0
+      NAME: DefaultAnchorGenerator
+      OFFSET: 0.0
+      SIZES:
+      - - 32
+        - 64
+        - 128
+        - 256
+        - 512
+    backbone:
+      # FREEZE_AT: 0
+      # NAME: build_resnet_backbone
+      name: resnet50 # resnet101
+      output_stride: 32
+      pretrained_backbone: False
+      backbone_file: "~/Experiments/checkpoints/resnet50_hollistic.pth" # ./data/resnet50-19c8e357.pth # ./data/resnet101-5d3b4d8f.pth
+      #backbone_file: None #Prior2Former/Model_Weights/resnet34-b627a593.pth
+    DEVICE: cuda
+    FPN:
+      FUSE_TYPE: sum
+      IN_FEATURES: []
+      NORM: ''
+      OUT_CHANNELS: 256
+    KEYPOINT_ON: false
+    LOAD_PROPOSALS: false
+    args:
+      TRANSFORMER_DECODER_NAME: MultiScaleMaskedTransformerDecoder
+      TRANSFORMER_IN_FEATURE: multi_scale_pixel_decoder
+      losses:
+        mask:
+          name: mask2former
+          args:
+            deep_supervision: true
+            eos_coef: 0.1 #no_object_weight
+            class_weight: 2.0
+            dice_weight: 5.0
+            mask_weight: 5.0
+            dec_layers: 10
+            num_points: 12544
+            oversample_ratio: 3.0
+            importance_sample_ratio: 0.75
+          weight: 1
+    MASK_ON: false
+    META_ARCHITECTURE: MaskFormer
+    PANOPTIC_FPN:
+      COMBINE:
+        ENABLED: true
+        INSTANCES_CONFIDENCE_THRESH: 0.5
+        OVERLAP_THRESH: 0.5
+        STUFF_AREA_LIMIT: 4096
+      INSTANCE_LOSS_WEIGHT: 1.0
+    PROPOSAL_GENERATOR:
+      MIN_SIZE: 0
+      NAME: RPN
+  optimizer:
+    name: adamw
+    args:
+      lr: 0.0001
+      weight_decay: 0.05
+    backbone_lr_factor: 0.1
+    lr_scheduler: # originally decaying the learningrate every 30000 steps by 0.1
+      type: polynomial
+      args:
+        #max_epochs: 5 # set as 100
+        power: 0.9
+        total_iters: 50
+trainer:
+  trainer_args:
+    gradient_clip_val: 0.01
+  max_epochs: 30
+#version 1
