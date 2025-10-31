@@ -62,6 +62,39 @@ pub_images () {
   fi
   local SIF="${HOME}/containers/ros_humble_perception.sif"
 
+  # Ensure DDS transport config matches the current node pair.
+  local GPU_IP
+  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
+  local CPU_IP="130.89.6.254"
+  cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="unicast_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>udp_only</transport_id></userTransports>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>${CPU_IP}</address></udpv4></locator>
+          <locator><udpv4><address>${GPU_IP}</address></udpv4></locator>
+        </initialPeersList>
+        <avoid_builtin_multicast>true</avoid_builtin_multicast>
+      </builtin>
+      <throughputController>
+        <bytesPerPeriod>2097152</bytesPerPeriod>
+        <periodMillisecs>0</periodMillisecs>
+      </throughputController>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+
   local LOOP_FLAG=""
   if [[ "${1:-}" == "loop" ]]; then
     LOOP_FLAG="--loop"
