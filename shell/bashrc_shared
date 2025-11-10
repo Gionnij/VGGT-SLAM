@@ -213,12 +213,10 @@ PY
 
 
 prior2former_env () {
-  # Keep shell clean and load the *right* modules for CUDA 12.x
   if command -v module >/dev/null 2>&1; then
     module purge || true
     module load "${PYTHON_MODULE:-python/3.10.7}" \
-                "${CUDA_MODULE:-nvidia/cuda-12.4}" \
-                "${GCC_MODULE:-gcc/12}" 2>/dev/null || true
+                "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
   fi
 
   : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
@@ -226,18 +224,18 @@ prior2former_env () {
 
   local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
   if [ ! -d "${VENV_PATH}" ]; then
-    echo "[prior2former_env] venv missing at ${VENV_PATH}. Create it first." >&2
+    echo "[prior2former_env] venv missing at ${VENV_PATH}" >&2
     return 1
   fi
 
-  # shellcheck disable=SC1090
   . "${VENV_PATH}/bin/activate"
 
-  # CUDA/Torch build hints (useful for native builds like Detectron2)
-  export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
-  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6;8.9;9.0}"  # A100/Lovelace/Hopper; tweak if needed
+  # Explicitly re-set CUDA_HOME to the 12.4 path after module load
+  export CUDA_HOME="/opt/nvidia/cuda-12.4"   # <-- adjust if your cluster uses another root
+  export PATH="${CUDA_HOME}/bin:${PATH}"
+  export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6;8.9;9.0}"
   export PYTHONPATH="${VGGT_SLAM_ROOT}/Prior2Former:${PYTHONPATH}"
 
   echo "[prior2former_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}"
 }
-# --- end Prior2Former helper ---
