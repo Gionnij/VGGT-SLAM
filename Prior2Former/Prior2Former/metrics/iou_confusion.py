@@ -2,7 +2,12 @@ from typing import Optional, Tuple
 
 import torch
 
-from torchmetrics.classification.iou import IoU
+try:
+    # old API (<=0.11)
+    from torchmetrics.classification.iou import IoU
+except Exception:
+    # new API (>=1.0)
+    from torchmetrics.classification import MulticlassJaccardIndex as IoU
 
 
 from torchmetrics.functional.classification.confusion_matrix import (
