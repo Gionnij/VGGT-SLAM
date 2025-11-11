@@ -212,6 +212,35 @@ PY
 }
 
 
+# prior2former_env () {
+#   if command -v module >/dev/null 2>&1; then
+#     module purge || true
+#     module load "${PYTHON_MODULE:-python/3.10.7}" \
+#                 "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
+#   fi
+
+#   : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
+#   : "${VGGT_SLAM_ROOT:=${HOME}/src/VGGT-SLAM}"
+
+#   local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
+#   if [ ! -d "${VENV_PATH}" ]; then
+#     echo "[prior2former_env] venv missing at ${VENV_PATH}" >&2
+#     return 1
+#   fi
+
+#   . "${VENV_PATH}/bin/activate"
+
+#   # Explicitly re-set CUDA_HOME to the 12.4 path after module load
+#   export CUDA_HOME="/opt/nvidia/cuda-12.4"   # <-- adjust if your cluster uses another root
+#   export PATH="${CUDA_HOME}/bin:${PATH}"
+#   export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+#   export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6;8.9;9.0}"
+#   export PYTHONPATH="${VGGT_SLAM_ROOT}/Prior2Former:${PYTHONPATH}"
+
+#   echo "[prior2former_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}"
+# }
+
+
 prior2former_env () {
   if command -v module >/dev/null 2>&1; then
     module purge || true
@@ -221,21 +250,54 @@ prior2former_env () {
 
   : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
   : "${VGGT_SLAM_ROOT:=${HOME}/src/VGGT-SLAM}"
+  : "${AUTO_PICK_GPU:=1}"   # set AUTO_PICK_GPU=0 to disable auto-pick
 
   local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
-  if [ ! -d "${VENV_PATH}" ]; then
-    echo "[prior2former_env] venv missing at ${VENV_PATH}" >&2
-    return 1
-  fi
-
+  [ -d "${VENV_PATH}" ] || { echo "[prior2former_env] venv missing at ${VENV_PATH}" >&2; return 1; }
   . "${VENV_PATH}/bin/activate"
 
-  # Explicitly re-set CUDA_HOME to the 12.4 path after module load
-  export CUDA_HOME="/opt/nvidia/cuda-12.4"   # <-- adjust if your cluster uses another root
+  export CUDA_HOME="/opt/nvidia/cuda-12.4"
   export PATH="${CUDA_HOME}/bin:${PATH}"
   export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
-  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6;8.9;9.0}"
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"   # A40 is 8.6
   export PYTHONPATH="${VGGT_SLAM_ROOT}/Prior2Former:${PYTHONPATH}"
 
-  echo "[prior2former_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}"
+  # If Slurm already bound GPUs, don't override it.
+  if [ -n "${CUDA_VISIBLE_DEVICES+x}" ] && [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
+    echo "[prior2former_env] Using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (pre-set)"
+  elif [ "${AUTO_PICK_GPU}" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    # Build mapping index->uuid
+    mapfile -t IDX_UUID < <(nvidia-smi -L | awk -F'[() ]+' '{print $2" "$6}')
+    # Allowed UUIDs from Slurm (if any)
+    allow="${SLURM_STEP_GPUS:-${SLURM_JOB_GPUS:-}}"
+    allow="${allow//,/ }"
+
+    # Query gpu: index,uuid,mem.used,util
+    mapfile -t ROWS < <(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu \
+                       --format=csv,noheader,nounits 2>/dev/null)
+
+    best_idx=""; best_score=""
+    for r in "${ROWS[@]}"; do
+      IFS=',' read -r idx uuid mem util <<<"$r"
+      idx="${idx//[[:space:]]/}"; uuid="${uuid//[[:space:]]/}"
+      mem="${mem//[[:space:]]/}"; util="${util//[[:space:]]/}"
+      # Filter to allowed UUIDs if Slurm provided them
+      if [ -n "$allow" ]; then
+        case " $allow " in *"$uuid"*) : ;; *) continue ;; esac
+      fi
+      score=$(printf "%012d-%03d" "$mem" "$util")  # lower is better
+      if [ -z "$best_score" ] || [ "$score" \< "$best_score" ]; then
+        best_score="$score"; best_idx="$idx"
+      fi
+    done
+
+    if [ -n "$best_idx" ]; then
+      export CUDA_VISIBLE_DEVICES="$best_idx"
+      echo "[prior2former_env] Auto-picked GPU index ${best_idx} (least mem/util)"
+    else
+      echo "[prior2former_env] No candidate GPU to pick (maybe already bound by cgroups)."
+    fi
+  fi
+
+  echo "[prior2former_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}, CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 }
