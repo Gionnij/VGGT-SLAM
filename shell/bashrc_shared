@@ -244,13 +244,12 @@ PY
 prior2former_env () {
   if command -v module >/dev/null 2>&1; then
     module purge || true
-    module load "${PYTHON_MODULE:-python/3.10.7}" \
-                "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
+    module load "${PYTHON_MODULE:-python/3.10.7}" "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
   fi
 
   : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
   : "${VGGT_SLAM_ROOT:=${HOME}/src/VGGT-SLAM}"
-  : "${AUTO_PICK_GPU:=1}"   # set AUTO_PICK_GPU=0 to disable auto-pick
+  : "${AUTO_PICK_GPU:=1}"
 
   local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
   [ -d "${VENV_PATH}" ] || { echo "[prior2former_env] venv missing at ${VENV_PATH}" >&2; return 1; }
@@ -259,43 +258,45 @@ prior2former_env () {
   export CUDA_HOME="/opt/nvidia/cuda-12.4"
   export PATH="${CUDA_HOME}/bin:${PATH}"
   export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
-  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"   # A40 is 8.6
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9;9.0;8.6}"  # L40=8.9, H100=9.0, A40=8.6
   export PYTHONPATH="${VGGT_SLAM_ROOT}/Prior2Former:${PYTHONPATH}"
+  export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
-  # If Slurm already bound GPUs, don't override it.
+  # If already bound, keep it.
   if [ -n "${CUDA_VISIBLE_DEVICES+x}" ] && [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
-    echo "[prior2former_env] Using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (pre-set)"
-  elif [ "${AUTO_PICK_GPU}" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
-    # Build mapping index->uuid
-    mapfile -t IDX_UUID < <(nvidia-smi -L | awk -F'[() ]+' '{print $2" "$6}')
-    # Allowed UUIDs from Slurm (if any)
-    allow="${SLURM_STEP_GPUS:-${SLURM_JOB_GPUS:-}}"
-    allow="${allow//,/ }"
-
-    # Query gpu: index,uuid,mem.used,util
-    mapfile -t ROWS < <(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu \
-                       --format=csv,noheader,nounits 2>/dev/null)
-
-    best_idx=""; best_score=""
-    for r in "${ROWS[@]}"; do
-      IFS=',' read -r idx uuid mem util <<<"$r"
-      idx="${idx//[[:space:]]/}"; uuid="${uuid//[[:space:]]/}"
-      mem="${mem//[[:space:]]/}"; util="${util//[[:space:]]/}"
-      # Filter to allowed UUIDs if Slurm provided them
-      if [ -n "$allow" ]; then
-        case " $allow " in *"$uuid"*) : ;; *) continue ;; esac
+    :
+  else
+    # Prefer Slurm's assignment
+    slurm_gpus="${SLURM_STEP_GPUS:-${SLURM_JOB_GPUS:-}}"
+    if [ -n "$slurm_gpus" ]; then
+      # Normalize separators
+      slurm_gpus="${slurm_gpus//,/ }"
+      # Case 1: numeric indices (e.g., "3" or "0 2")
+      if echo "$slurm_gpus" | grep -Eq '^[0-9 ]+$'; then
+        export CUDA_VISIBLE_DEVICES="$(echo "$slurm_gpus" | awk '{print $1}')"  # take first
+      else
+        # Case 2: UUIDs → map to indices
+        if command -v nvidia-smi >/dev/null 2>&1; then
+          # Build uuid->index map
+          # nvidia-smi -L outputs: GPU 0: NAME (UUID: GPU-xxxxxxxx-...)
+          while read -r idx uuid; do
+            for u in $slurm_gpus; do
+              [ "$u" = "$uuid" ] && export CUDA_VISIBLE_DEVICES="$idx"
+            done
+          done < <(nvidia-smi -L | awk -F'[(): ]+' '/UUID/{printf "%s %s\n",$3,$7}')
+        fi
       fi
-      score=$(printf "%012d-%03d" "$mem" "$util")  # lower is better
-      if [ -z "$best_score" ] || [ "$score" \< "$best_score" ]; then
-        best_score="$score"; best_idx="$idx"
-      fi
-    done
+    fi
 
-    if [ -n "$best_idx" ]; then
-      export CUDA_VISIBLE_DEVICES="$best_idx"
-      echo "[prior2former_env] Auto-picked GPU index ${best_idx} (least mem/util)"
-    else
-      echo "[prior2former_env] No candidate GPU to pick (maybe already bound by cgroups)."
+    # If still empty and auto-pick enabled, choose least busy visible GPU
+    if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && [ "$AUTO_PICK_GPU" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
+      best=""; bestscore=""
+      while IFS=',' read -r idx uuid mem util; do
+        idx="${idx//[[:space:]]/}"; mem="${mem//[[:space:]]/}"; util="${util//[[:space:]]/}"
+        score=$(printf "%012d-%03d" "$mem" "$util")
+        if [ -z "$bestscore" ] || [ "$score" \< "$bestscore" ]; then bestscore="$score"; best="$idx"; fi
+      done < <(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
+      [ -n "$best" ] && export CUDA_VISIBLE_DEVICES="$best"
     fi
   fi
 
