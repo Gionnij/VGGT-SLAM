@@ -10,9 +10,23 @@ except Exception:
     from torchmetrics.classification import MulticlassJaccardIndex as IoU
 
 
-from torchmetrics.functional.classification.confusion_matrix import (
-    _confusion_matrix_compute,
-)
+try:
+    from torchmetrics.functional.classification.confusion_matrix import (
+        _confusion_matrix_compute,
+    )
+except ImportError:
+    def _confusion_matrix_compute(
+        confmat: torch.Tensor, normalize: Optional[str] = None
+    ) -> torch.Tensor:
+        """Fallback for torchmetrics>=1.0 where internal helper is removed."""
+        if normalize is None:
+            return confmat
+        if normalize not in {"true"}:
+            raise ValueError("Only 'true' normalization is supported in this fallback.")
+
+        confmat = confmat.float()
+        denom = confmat.sum(dim=1, keepdim=True)
+        return torch.where(denom == 0, torch.zeros_like(confmat), confmat / denom)
 
 # from torchmetrics.functional.classification.iou import _iou_from_confmat
 from torchmetrics.utilities.distributed import reduce
