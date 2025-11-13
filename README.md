@@ -116,6 +116,29 @@ See main.py or run `--help` from main.py to view all parameters.
 We use SL(4) mode by default, and Sim(3) mode can be enabled with `--use_sim3`. Sim(3) mode will generally have less drift than SL(4) but will not always 
 be sufficient for alignment (see paper for in depth discussion on the advantages of SL(4)).
 
+### Mask2Former Semantic Head
+
+We now ship a plug-and-play Mask2Former head powered by the Hugging Face
+`Mask2FormerForUniversalSegmentation` implementation. Enable it by exporting
+`VGGT_SEMANTIC_HEAD=1` before running VGGT-SLAM — the runner will automatically
+download the default `facebook/mask2former-swin-base-ade-semantic` checkpoint.
+
+Useful knobs (all optional):
+
+- `VGGT_M2F_MODEL_ID`: Any HF model id compatible with
+  `Mask2FormerForUniversalSegmentation` (e.g., cityscapes or COCO variants).
+- `VGGT_M2F_PRECISION`: `fp32` (default) or `fp16` when running on CUDA devices.
+- `VGGT_SEM_FRAME_MODE`: `last` (default), `first`, or `all` to control which
+  frames of a sequence get segmented. For arbitrary frames, set
+  `VGGT_SEM_FRAME_INDEX` to a specific (possibly negative) index.
+- `VGGT_M2F_TRUST_REMOTE_CODE`: Set to `1` only if the chosen checkpoint
+  requires custom model code.
+
+The resulting logits, mask proposals, semantic maps, and frame indices are
+attached to the predictions dict (`sem_cls_logits`, `sem_mask_logits`,
+`semantic_maps`, `sem_frame_indices`) so downstream consumers can fuse them with
+the rest of the pipeline.
+
 ---
 
 ## Running Evaluations
@@ -179,4 +202,3 @@ If our code is helpful, please cite our paper as follows:
   year={2025}
 }
 ```
-

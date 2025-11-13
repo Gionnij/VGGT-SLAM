@@ -9,8 +9,17 @@ if [ -z "${VGGT_SLAM_ROOT}" ]; then
 fi
 export VGGT_SLAM_ROOT
 
-# Convenience path to shared virtual environments.
-export VGGT_VENV_DIR="${HOME}/.venvs"
+# Convenience path to shared virtual environments (falls back to repo-local dir).
+if [ -z "${VGGT_VENV_DIR:-}" ]; then
+  if [ -d "${HOME}/.venvs" ]; then
+    export VGGT_VENV_DIR="${HOME}/.venvs"
+  else
+    export VGGT_VENV_DIR="${VGGT_SLAM_ROOT}/.venvs"
+  fi
+else
+  export VGGT_VENV_DIR
+fi
+mkdir -p "${VGGT_VENV_DIR}" 2>/dev/null || true
 
 # Load common HPC modules when available.
 if command -v module >/dev/null 2>&1; then
@@ -212,36 +221,7 @@ PY
 }
 
 
-# prior2former_env () {
-#   if command -v module >/dev/null 2>&1; then
-#     module purge || true
-#     module load "${PYTHON_MODULE:-python/3.10.7}" \
-#                 "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
-#   fi
-
-#   : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
-#   : "${VGGT_SLAM_ROOT:=${HOME}/src/VGGT-SLAM}"
-
-#   local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
-#   if [ ! -d "${VENV_PATH}" ]; then
-#     echo "[prior2former_env] venv missing at ${VENV_PATH}" >&2
-#     return 1
-#   fi
-
-#   . "${VENV_PATH}/bin/activate"
-
-#   # Explicitly re-set CUDA_HOME to the 12.4 path after module load
-#   export CUDA_HOME="/opt/nvidia/cuda-12.4"   # <-- adjust if your cluster uses another root
-#   export PATH="${CUDA_HOME}/bin:${PATH}"
-#   export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
-#   export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6;8.9;9.0}"
-#   export PYTHONPATH="${VGGT_SLAM_ROOT}/Prior2Former:${PYTHONPATH}"
-
-#   echo "[prior2former_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}"
-# }
-
-
-prior2former_env () {
+gpu_node_env () {
   if command -v module >/dev/null 2>&1; then
     module purge || true
     module load "${PYTHON_MODULE:-python/3.10.7}" "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
@@ -250,55 +230,101 @@ prior2former_env () {
   : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
   : "${VGGT_SLAM_ROOT:=${HOME}/src/VGGT-SLAM}"
   : "${AUTO_PICK_GPU:=1}"
+  : "${VGGT_GPU_VENV:=gpu-node}"
+  : "${VGGT_CUDA_HOME:=/opt/nvidia/cuda-12.4}"
 
-  local VENV_PATH="${VGGT_VENV_DIR}/prior2former"
-  [ -d "${VENV_PATH}" ] || { echo "[prior2former_env] venv missing at ${VENV_PATH}" >&2; return 1; }
+  local env_name="${1:-${VGGT_GPU_VENV}}"
+  local VENV_PATH="${VGGT_VENV_DIR}/${env_name}"
+  [ -d "${VENV_PATH}" ] || { echo "[gpu_node_env] venv missing at ${VENV_PATH}" >&2; return 1; }
   . "${VENV_PATH}/bin/activate"
 
-  export CUDA_HOME="/opt/nvidia/cuda-12.4"
+  export CUDA_HOME="${VGGT_CUDA_HOME}"
   export PATH="${CUDA_HOME}/bin:${PATH}"
   export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
   export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9;9.0;8.6}"  # L40=8.9, H100=9.0, A40=8.6
-  export PYTHONPATH="${VGGT_SLAM_ROOT}/Prior2Former:${PYTHONPATH}"
   export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
-  # If already bound, keep it.
-  if [ -n "${CUDA_VISIBLE_DEVICES+x}" ] && [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
-    :
-  else
-    # Prefer Slurm's assignment
-    slurm_gpus="${SLURM_STEP_GPUS:-${SLURM_JOB_GPUS:-}}"
-    if [ -n "$slurm_gpus" ]; then
-      # Normalize separators
-      slurm_gpus="${slurm_gpus//,/ }"
-      # Case 1: numeric indices (e.g., "3" or "0 2")
-      if echo "$slurm_gpus" | grep -Eq '^[0-9 ]+$'; then
-        export CUDA_VISIBLE_DEVICES="$(echo "$slurm_gpus" | awk '{print $1}')"  # take first
-      else
-        # Case 2: UUIDs → map to indices
-        if command -v nvidia-smi >/dev/null 2>&1; then
-          # Build uuid->index map
-          # nvidia-smi -L outputs: GPU 0: NAME (UUID: GPU-xxxxxxxx-...)
-          while read -r idx uuid; do
-            for u in $slurm_gpus; do
-              [ "$u" = "$uuid" ] && export CUDA_VISIBLE_DEVICES="$idx"
-            done
-          done < <(nvidia-smi -L | awk -F'[(): ]+' '/UUID/{printf "%s %s\n",$3,$7}')
-        fi
-      fi
-    fi
+  _vggt_bind_gpu
 
-    # If still empty and auto-pick enabled, choose least busy visible GPU
-    if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && [ "$AUTO_PICK_GPU" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
-      best=""; bestscore=""
-      while IFS=',' read -r idx uuid mem util; do
-        idx="${idx//[[:space:]]/}"; mem="${mem//[[:space:]]/}"; util="${util//[[:space:]]/}"
-        score=$(printf "%012d-%03d" "$mem" "$util")
-        if [ -z "$bestscore" ] || [ "$score" \< "$bestscore" ]; then bestscore="$score"; best="$idx"; fi
-      done < <(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
-      [ -n "$best" ] && export CUDA_VISIBLE_DEVICES="$best"
+  echo "[gpu_node_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}, CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+}
+
+
+# Utility: best-effort CUDA binding (Slurm-aware, falls back to utilisation-based pick).
+_vggt_bind_gpu () {
+  local auto_pick="${AUTO_PICK_GPU:-1}"
+  export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+  if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    return
+  fi
+
+  local slurm_gpus="${SLURM_STEP_GPUS:-${SLURM_JOB_GPUS:-}}"
+  if [ -n "$slurm_gpus" ]; then
+    slurm_gpus="${slurm_gpus//,/ }"
+    if echo "$slurm_gpus" | grep -Eq '^[0-9 ]+$'; then
+      export CUDA_VISIBLE_DEVICES="$(echo "$slurm_gpus" | awk '{print $1}')"
+    elif command -v nvidia-smi >/dev/null 2>&1; then
+      while read -r idx uuid; do
+        for u in $slurm_gpus; do
+          if [ "$u" = "$uuid" ]; then
+            export CUDA_VISIBLE_DEVICES="$idx"
+            break 2
+          fi
+        done
+      done < <(nvidia-smi -L | awk -F'[(): ]+' '/UUID/{printf "%s %s\n",$3,$7}')
     fi
   fi
 
-  echo "[prior2former_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}, CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+  if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && [ "$auto_pick" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    local best="" bestscore=""
+    while IFS=',' read -r idx uuid mem util; do
+      idx="${idx//[[:space:]]/}"
+      mem="${mem//[[:space:]]/}"
+      util="${util//[[:space:]]/}"
+      local score
+      score=$(printf "%012d-%03d" "$mem" "$util")
+      if [ -z "$bestscore" ] || [ "$score" \< "$bestscore" ]; then
+        bestscore="$score"
+        best="$idx"
+      fi
+    done < <(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
+    [ -n "$best" ] && export CUDA_VISIBLE_DEVICES="$best"
+  fi
+}
+
+vggt_env () {
+  local env_name="${1:-${VGGT_SLAM_ENV:-vggt-slam}}"
+
+  if command -v module >/dev/null 2>&1; then
+    module purge || true
+    module load "${PYTHON_MODULE:-python/3.10.7}" "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
+  fi
+
+  : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
+  local venv_path="${VGGT_VENV_DIR}/${env_name}"
+  if [ ! -d "${venv_path}" ]; then
+    echo "[vggt_env] venv missing at ${venv_path}" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC1090
+  . "${venv_path}/bin/activate"
+
+  if [ -z "${CUDA_HOME:-}" ] && [ -d "/opt/nvidia/cuda-12.4" ]; then
+    export CUDA_HOME="/opt/nvidia/cuda-12.4"
+  fi
+  if [ -n "${CUDA_HOME:-}" ]; then
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+  fi
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6;8.9;9.0}"
+
+  _vggt_bind_gpu
+
+  echo "[vggt_env] ✅ Activated ($(python -V)), CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+}
+
+mask2former_env () {
+  vggt_env "${1:-${VGGT_MASK2FORMER_ENV:-vggt-slam}}"
 }

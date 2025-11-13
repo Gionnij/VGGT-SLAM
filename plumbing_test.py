@@ -142,7 +142,7 @@ if __name__ == "__main__":
     # 3) Fuse DINO + depth
     fused = fusion(p_feats, dino_feats["dino"])
 
-    # 4) Forward through head (Prior2Former-like)
+    # 4) Forward through head (Mask2Former-like)
     pred_logits, pred_masks = head(fused)
     print("logits:", tuple(pred_logits.shape), "masks:", tuple(pred_masks.shape))
 

@@ -8,15 +8,48 @@ from .semantic_head import SemanticHead
 _SEM_REGISTRY = {"head": None}
 
 
+def _resolve_dtype(device: torch.device) -> torch.dtype:
+    precision = os.getenv("VGGT_M2F_PRECISION", "fp32").lower()
+    if precision in {"fp16", "half"} and device.type == "cuda":
+        return torch.float16
+    return torch.float32
+
+
 def _get_semantic_head(device: torch.device) -> SemanticHead:
     head = _SEM_REGISTRY.get("head")
     if head is None:
-        num_classes = int(os.getenv("VGGT_SEM_CLASSES", "20"))
-        num_queries = int(os.getenv("VGGT_SEM_QUERIES", "50"))
-        head = SemanticHead(num_classes=num_classes, num_queries=num_queries).to(device=device)
+        model_id = os.getenv("VGGT_M2F_MODEL_ID", "facebook/mask2former-swin-base-ade-semantic")
+        trust_remote = os.getenv("VGGT_M2F_TRUST_REMOTE_CODE", "0") == "1"
+        head = SemanticHead(
+            model_id=model_id,
+            device=device,
+            torch_dtype=_resolve_dtype(device),
+            trust_remote_code=trust_remote,
+        )
         head.eval()
         _SEM_REGISTRY["head"] = head
     return head
+
+
+def _select_frames(images: torch.Tensor) -> Optional[List[int]]:
+    S = images.shape[1]
+    if S == 0:
+        return None
+
+    idx_env = os.getenv("VGGT_SEM_FRAME_INDEX")
+    if idx_env is not None:
+        idx = int(idx_env)
+        if idx < 0:
+            idx += S
+        idx = max(0, min(S - 1, idx))
+        return [idx]
+
+    mode = os.getenv("VGGT_SEM_FRAME_MODE", "last").lower()
+    if mode == "all":
+        return list(range(S))
+    if mode == "first":
+        return [0]
+    return [S - 1]
 
 
 @torch.no_grad()
@@ -28,19 +61,19 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
     if os.getenv("VGGT_SEMANTIC_HEAD", "0") != "1":
         return
 
-    depth_head = getattr(model, "depth_head", None)
-    if depth_head is None:
+    images = predictions.get("images")
+    if images is None or images.ndim != 5:
         return
 
-    pyramid: Optional[List[torch.Tensor]] = getattr(depth_head, "film_side_pyramid", None)
-    # TODO: re-enable raw pyramid fallback after FiLM/sem head validation.
-    # if pyramid is None:
-    #     pyramid = getattr(depth_head, "raw_pyramid", None)
-
-    if not pyramid or any(level is None for level in pyramid):
+    frame_indices = _select_frames(images)
+    if not frame_indices:
         return
 
+    images_subset = images[:, frame_indices, ...]
     head = _get_semantic_head(device)
-    cls_logits, mask_logits = head(pyramid)
+    cls_logits, mask_logits, semantic_maps = head(images_subset)
+
+    predictions["sem_frame_indices"] = frame_indices
     predictions["sem_cls_logits"] = cls_logits
     predictions["sem_mask_logits"] = mask_logits
+    predictions["semantic_maps"] = semantic_maps

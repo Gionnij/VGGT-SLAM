@@ -1,98 +1,93 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List, Tuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import List, Tuple
+from transformers import Mask2FormerForUniversalSegmentation, Mask2FormerImageProcessor
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
-class TinyPixelDecoder(nn.Module):
-    def __init__(self, in_chs=None, out_ch=256):
-        super().__init__()
-        in_chs = in_chs or [256, 512, 1024, 1024]
-        self.proj = nn.ModuleList([nn.Conv2d(c, out_ch, kernel_size=1) for c in in_chs])
-        self.fuse = nn.Sequential(
-            nn.Conv2d(out_ch * len(in_chs), out_ch, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-        )
+def _to_numpy_images(batch: torch.Tensor) -> Tuple[List["np.ndarray"], List[Tuple[int, int]]]:
+    """
+    Convert a (N, 3, H, W) float tensor in [0, 1] to a list of uint8 HWC numpy arrays.
+    """
+    if batch.ndim != 4:
+        raise ValueError(f"Expected tensor of shape (N, 3, H, W), got {tuple(batch.shape)}")
 
-    def forward(self, pyramid: List[torch.Tensor]) -> torch.Tensor:
-        """
-        Args:
-            pyramid: list of 4 tensors shaped (B, S, C, H, W) corresponding to p2..p5.
-        Returns:
-            Fused feature map shaped (B, S, 256, H, W).
-        """
-        assert len(pyramid) == 4, "Expected 4 pyramid levels (p2..p5)."
-        B, S = pyramid[0].shape[:2]
-        target_hw = pyramid[0].shape[-2:]
-        fused = []
-        for level, feat in enumerate(pyramid):
-            feat = feat.reshape(B * S, *feat.shape[2:])  # (B*S, C, H, W)
-            proj = self.proj[level](feat)                # (B*S, out_ch, H, W)
-            if proj.shape[-2:] != target_hw:
-                proj = F.interpolate(proj, size=target_hw, mode="bilinear", align_corners=True)
-            fused.append(proj)
-        x = torch.cat(fused, dim=1)                      # (B*S, out_ch*4, H, W)
-        x = self.fuse(x)                                 # (B*S, out_ch, H, W)
-        return x.view(B, S, *x.shape[1:])                # (B, S, out_ch, H, W)
-
-
-class TinyTransformerDecoder(nn.Module):
-    def __init__(self, d_model=256, nhead=8, num_layers=2, num_queries=50, num_classes=20):
-        super().__init__()
-        self.num_queries = num_queries
-        self.query = nn.Parameter(torch.randn(num_queries, d_model))
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=512,
-            batch_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers)
-        self.class_head = nn.Linear(d_model, num_classes + 1)  # +1 for "no-object"
-        self.mask_embed = nn.Linear(d_model, d_model)
-        self.mask_proj = nn.Conv2d(d_model, d_model, kernel_size=1)
-        nn.init.normal_(self.query, std=0.02)
-
-    def forward(self, pixel_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            pixel_features: (B, S, 256, H, W)
-        Returns:
-            cls_logits: (B, S, Q, num_classes+1)
-            mask_logits: (B, S, Q, H, W)
-        """
-        B, S, C, H, W = pixel_features.shape
-        mem = pixel_features.view(B * S, C, H, W)
-        mem_proj = self.mask_proj(mem)                       # (B*S, C, H, W)
-        mem_seq = mem_proj.flatten(2).transpose(1, 2)        # (B*S, HW, C)
-
-        queries = self.query.unsqueeze(0).expand(B * S, -1, -1)  # (B*S, Q, C)
-        decoded = self.decoder(queries, mem_seq)                 # (B*S, Q, C)
-
-        cls_logits = self.class_head(decoded).view(B, S, self.num_queries, -1)
-
-        mask_embed = self.mask_embed(decoded)                    # (B*S, Q, C)
-        masks = torch.einsum("bqc,bchw->bqhw", mask_embed, mem_proj)
-        masks = masks.view(B, S, self.num_queries, H, W)
-        return cls_logits, masks
+    batch = batch.detach().cpu().clamp(0, 1)
+    np_images: List["np.ndarray"] = []
+    sizes: List[Tuple[int, int]] = []
+    for img in batch:
+        arr = (img * 255.0).to(torch.uint8).permute(1, 2, 0).numpy()
+        np_images.append(arr)
+        sizes.append((arr.shape[0], arr.shape[1]))
+    return np_images, sizes
 
 
 class SemanticHead(nn.Module):
-    def __init__(self, in_chs=None, num_classes=20, num_queries=50):
+    """
+    Thin wrapper around Hugging Face's Mask2Former implementation.
+    """
+
+    def __init__(
+        self,
+        model_id: str,
+        device: torch.device,
+        torch_dtype: torch.dtype = torch.float32,
+        trust_remote_code: bool = False,
+    ) -> None:
         super().__init__()
-        in_chs = in_chs or [256, 512, 1024, 1024]
-        self.pixel = TinyPixelDecoder(in_chs=in_chs, out_ch=256)
-        self.decoder = TinyTransformerDecoder(
-            d_model=256,
-            nhead=8,
-            num_layers=2,
-            num_queries=num_queries,
-            num_classes=num_classes,
+        self.model_id = model_id
+        self.processor = Mask2FormerImageProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+        self.model = Mask2FormerForUniversalSegmentation.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            trust_remote_code=trust_remote_code,
         )
+        self.to(device)
+        self._model_device = next(self.model.parameters()).device
 
     @torch.no_grad()
-    def forward(self, pyramid: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        pixel_feats = self.pixel(pyramid)
-        return self.decoder(pixel_feats)
+    def forward(
+        self,
+        images: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            images: tensor shaped (B, S, 3, H, W) in [0, 1].
+
+        Returns:
+            cls_logits: (B, S, Q, K)
+            mask_logits: (B, S, Q, H/4, W/4)
+            semantic_maps: (B, S, H, W) long tensor with per-pixel class ids
+        """
+        if images.ndim != 5:
+            raise ValueError(f"Expected tensor of shape (B, S, 3, H, W), got {tuple(images.shape)}")
+
+        B, S = images.shape[:2]
+        if B == 0 or S == 0:
+            raise ValueError("SemanticHead received an empty sequence of images.")
+
+        flat = images.reshape(B * S, *images.shape[2:])
+        np_images, target_sizes = _to_numpy_images(flat)
+
+        encoded_inputs = self.processor(images=np_images, return_tensors="pt")
+        encoded_inputs = {k: v.to(self._model_device) for k, v in encoded_inputs.items()}
+
+        outputs = self.model(**encoded_inputs)
+        cls_logits = outputs.class_queries_logits    # (B*S, Q, K)
+        mask_logits = outputs.masks_queries_logits   # (B*S, Q, H/4, W/4)
+
+        cls_logits = cls_logits.reshape(B, S, *cls_logits.shape[1:])
+        mask_logits = mask_logits.reshape(B, S, *mask_logits.shape[1:])
+
+        semantic_maps_list = self.processor.post_process_semantic_segmentation(
+            outputs,
+            target_sizes=target_sizes,
+        )
+        semantic_maps = torch.stack(semantic_maps_list, dim=0).reshape(B, S, *semantic_maps_list[0].shape)
+
+        return cls_logits, mask_logits, semantic_maps

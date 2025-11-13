@@ -6,6 +6,7 @@ cmake
 Pillow
 open3d
 huggingface_hub
+transformers>=4.44.0
 einops
 safetensors
 pytorch_metric_learning
