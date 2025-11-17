@@ -1,5 +1,19 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-from . import data  # register all new datasets
+import os
+import warnings
+
+# Dataset registration can pull in heavy dependencies; allow skipping for smoke tests
+# or environments with partial installs.
+if os.getenv("MASK2FORMER_SKIP_DATA") == "1":
+    data = None
+else:
+    try:
+        from . import data  # register all new datasets
+    except Exception as exc:
+        warnings.warn(
+            "[mask2former] Failed to register datasets (continuing without them): %s" % exc
+        )
+        data = None
 
 from . import modeling
 
