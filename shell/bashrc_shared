@@ -326,5 +326,5 @@ vggt_env () {
 }
 
 mask2former_env () {
-  vggt_env "${1:-${VGGT_MASK2FORMER_ENV:-vggt-slam}}"
+  vggt_env "${1:-${VGGT_MASK2FORMER_ENV:-mask2former}}"
 }
