@@ -1,13 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-# from . import data  # register all new datasets
-import warnings
-try:
-    from . import data  # register all new datasets
-except Exception as exc:  # pragma: no cover - best effort dataset registration
-    warnings.warn(
-        "[mask2former] Failed to register datasets (continuing without them): %s" % exc
-    )
-    data = None
+from . import data  # register all new datasets
 
 from . import modeling
 
