@@ -326,5 +326,26 @@ vggt_env () {
 }
 
 mask2former_env () {
-  vggt_env "${1:-${VGGT_MASK2FORMER_ENV:-mask2former}}"
+  # Allow override, but default venv name = "mask2former"
+  local env_name="${1:-${VGGT_MASK2FORMER_ENV:-mask2former}}"
+
+  # This env was built with CUDA 11.8 → keep it consistent
+  export PYTHON_MODULE="python/3.10.7"
+  export CUDA_MODULE="nvidia/cuda-11.8"
+
+  # Keep CUDA_HOME pinned to 11.8; vggt_env only sets it if empty
+  export CUDA_HOME="/deepstore/software/nvidia/cuda-11.8"
+
+  # Activate via the shared helper (modules, venv, GPU binding, arch list…)
+  vggt_env "${env_name}" || return $?
+
+  # Mask2Former-specific extras
+  export PYTHONPATH="${HOME}/src/VGGT-SLAM/mask2former:${PYTHONPATH}"
+  export MASK2FORMER_SKIP_DATA=1
+
+  echo "[mask2former_env] ✅ Activated env='${env_name}' (CUDA 11.8, torch $(python - << 'PY'
+import torch
+print(torch.__version__, end="")
+PY
+))"
 }
