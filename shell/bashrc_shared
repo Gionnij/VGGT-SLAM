@@ -349,3 +349,75 @@ print(torch.__version__, end="")
 PY
 ))"
 }
+
+
+# Start a SOCKS5 tunnel from the current GPU node back to the head node.
+# Usage (on GPU node): hpc_gpu_tunnel_start [port]
+hpc_gpu_tunnel_start () {
+  local port="${1:-1080}"
+  local head_host="${HPC_HEAD_HOST:-hpc-head1.ewi.utwente.nl}"
+  local head_user="${HPC_HEAD_USER:-$USER}"
+  local node
+
+  node="$(hostname -s 2>/dev/null || hostname)"
+  echo "$node" > "$HOME/.hpc_last_gpu_node"
+
+  echo "[hpc_gpu_tunnel_start] GPU node: $node"
+  echo "[hpc_gpu_tunnel_start] Saved to \$HOME/.hpc_last_gpu_node"
+  echo "[hpc_gpu_tunnel_start] Opening SOCKS5 tunnel on 127.0.0.1:${port} → ${head_user}@${head_host}"
+  echo "[hpc_gpu_tunnel_start] Keep this terminal open; Ctrl+C to stop the tunnel."
+
+  # -N = no remote command; just port forwarding
+  ssh -N -D "127.0.0.1:${port}" "${head_user}@${head_host}"
+}
+
+# SSH into the last GPU node we recorded.
+# Usage (on head): hpc_gpu_ssh_last
+hpc_gpu_ssh_last () {
+  local node_file="$HOME/.hpc_last_gpu_node"
+
+  if [ ! -f "$node_file" ]; then
+    echo "[hpc_gpu_ssh_last] No \$HOME/.hpc_last_gpu_node found. Run hpc_gpu_tunnel_start on a GPU node first." >&2
+    return 1
+  fi
+
+  local node
+  node="$(cat "$node_file")"
+  if [ -z "$node" ]; then
+    echo "[hpc_gpu_ssh_last] Empty node name in $node_file" >&2
+    return 1
+  fi
+
+  echo "[hpc_gpu_ssh_last] SSH to GPU node: $node"
+  ssh "${USER}@${node}"
+}
+
+# Set HTTP(S) proxies to use the local SOCKS tunnel on this GPU node.
+# Usage (on GPU node): hpc_gpu_proxy_on [port]
+hpc_gpu_proxy_on () {
+  local port="${1:-1080}"
+  local proxy="socks5h://127.0.0.1:${port}"
+
+  export http_proxy="$proxy"
+  export https_proxy="$proxy"
+  export HTTP_PROXY="$proxy"
+  export HTTPS_PROXY="$proxy"
+
+  echo "[hpc_gpu_proxy_on] Proxies set to $proxy"
+
+  # Quick connectivity sanity check (optional)
+  if command -v curl >/dev/null 2>&1; then
+    if curl -s https://pypi.org/simple/detectron2/ >/dev/null; then
+      echo "[hpc_gpu_proxy_on] Connectivity test OK (PyPI reachable)."
+    else
+      echo "[hpc_gpu_proxy_on] WARNING: Connectivity test failed (PyPI not reachable)." >&2
+    fi
+  fi
+}
+
+# Unset HTTP(S) proxies.
+# Usage (on GPU node): hpc_gpu_proxy_off
+hpc_gpu_proxy_off () {
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+  echo "[hpc_gpu_proxy_off] Proxies unset."
+}
