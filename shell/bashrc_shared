@@ -368,8 +368,8 @@ hpc_gpu_tunnel_start () {
   echo "[hpc_gpu_tunnel_start] Keep this terminal open; Ctrl+C to stop the tunnel."
 
   # -N = no remote command; just port forwarding
-  # ssh -N -D "127.0.0.1:${port}" "${head_user}@${head_host}"
-  ssh -D "127.0.0.1:${port}" "${head_user}@${head_host}"
+  ssh -N -D "127.0.0.1:${port}" "${head_user}@${head_host}"
+  # ssh -D "127.0.0.1:${port}" "${head_user}@${head_host}"
 }
 
 # SSH into the last GPU node we recorded.
