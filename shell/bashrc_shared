@@ -350,6 +350,46 @@ PY
 ))"
 }
 
+# Shared env for VGGT-SLAM + Mask2Former
+vggt_m2f_env () {
+  cleanenv 2>/dev/null || true
+
+  # 1) Modules
+  if command -v module >/dev/null 2>&1; then
+    module load python/3.10.7 nvidia/cuda-11.8 2>/dev/null || true
+  fi
+
+  # 2) Activate venv
+  local VENV_PATH="$HOME/.venvs/vggt-m2f"
+  if [ ! -d "$VENV_PATH" ]; then
+    echo "[vggt_m2f_env] Missing venv at $VENV_PATH" >&2
+    return 1
+  fi
+  # shellcheck disable=SC1090
+  source "$VENV_PATH/bin/activate"
+
+  # 3) Paths
+  export VGGT_SLAM_ROOT="$HOME/src/VGGT-SLAM"
+  export CUDA_HOME=/deepstore/software/nvidia/cuda-11.8
+  export PATH="$CUDA_HOME/bin:$PATH"
+  export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+
+  # VGGT-SLAM core + salad + mask2former
+  export PYTHONPATH="$VGGT_SLAM_ROOT:$VGGT_SLAM_ROOT/salad:$VGGT_SLAM_ROOT/mask2former:${PYTHONPATH}"
+
+  # Mask2Former convenience
+  export MASK2FORMER_SKIP_DATA=1
+
+  # 4) Bind a GPU (uses your existing helper)
+  if type _vggt_bind_gpu >/dev/null 2>&1; then
+    _vggt_bind_gpu
+  fi
+
+  echo "[vggt_m2f_env] python: $(python -V 2>/dev/null)"
+  echo "[vggt_m2f_env] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-none}"
+  echo "[vggt_m2f_env] VGGT_SLAM_ROOT=$VGGT_SLAM_ROOT"
+}
+
 
 # Start a SOCKS5 tunnel from the current GPU node back to the head node.
 # Usage (on GPU node): hpc_gpu_tunnel_start [port]
@@ -421,4 +461,55 @@ hpc_gpu_proxy_on () {
 hpc_gpu_proxy_off () {
   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
   echo "[hpc_gpu_proxy_off] Proxies unset."
+}
+
+
+
+
+########## TESTS ##########
+
+
+# Quick Mask2Former smoke test helper
+m2f_smoke_test () {
+  vggt_m2f_env || return 1
+  cd "$VGGT_SLAM_ROOT" || return 1
+
+  python - << 'PY'
+import numpy as np, torch
+from detectron2.config import get_cfg
+from detectron2.projects.deeplab import add_deeplab_config
+from detectron2.engine import DefaultPredictor
+from mask2former import add_maskformer2_config
+
+cfg = get_cfg()
+add_deeplab_config(cfg)
+add_maskformer2_config(cfg)
+cfg.merge_from_file("mask2former/configs/coco/panoptic-segmentation/maskformer2_R50_bs16_50ep.yaml")
+cfg.INPUT.MIN_SIZE_TEST = cfg.INPUT.MAX_SIZE_TEST = 256
+cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+cfg.MODEL.WEIGHTS = ""
+predictor = DefaultPredictor(cfg)
+
+dummy = (np.random.rand(256, 256, 3) * 255).astype("uint8")
+with torch.no_grad():
+    outputs = predictor(dummy)
+panoptic, _ = outputs["panoptic_seg"]
+print("Panoptic output shape:", tuple(panoptic.shape))
+print("Semantic logits shape:", tuple(outputs["sem_seg"].shape))
+print("Instances summary:", outputs["instances"])
+PY
+}
+
+# Quick non-ROS VGGT run (your test entrypoint)
+vggt_offline_test () {
+  vggt_m2f_env || return 1
+  cd "$VGGT_SLAM_ROOT" || return 1
+
+  python main.py \
+    --image_folder /home/s2984792/scannetpp/data/5a269ba6fe/dslr/resized_undistorted_images \
+    --max_loops 2 \
+    --submap_size 40 \
+    --log_results \
+    --vis_map \
+    --conf_threshold 30.0
 }
