@@ -563,12 +563,9 @@ run_vggt_m2f () {
 EOF
 
   local SIF="${HOME}/containers/ros_humble_perception.sif"
-  local libffi_dir="/usr/lib/x86_64-linux-gnu"
-
   local binds=(
     --bind "${VGGT_VENV_DIR}:/venvs"
     --bind "${VGGT_SLAM_ROOT}:${VGGT_SLAM_ROOT}"
-    --bind "${libffi_dir}:${libffi_dir}"
   )
   [ -d "${HOME}/models" ] && binds+=( --bind "${HOME}/models:${HOME}/models" )
 
@@ -578,14 +575,8 @@ EOF
     # 1) ROS2 environment
     set +u; source /opt/ros/humble/setup.bash; set -u
 
-    # Make sure ROS python dirs are on PYTHONPATH *even inside the venv*
-    # These paths are the usual ones for ROS Humble on Ubuntu; if your SIF is different,
-    # you can tweak them, but they won’t hurt if they exist or not.
-    export ROS_PYTHONPATH="/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages"
-    export PYTHONPATH="${ROS_PYTHONPATH}:${PYTHONPATH}"
-
-    # libffi fix (rclpy sometimes needs this)
-    export LD_LIBRARY_PATH="'"${libffi_dir}"':${LD_LIBRARY_PATH:-}"
+    # Make sure system libs (including libspdlog + libffi) are on the path
+    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 
     export ROS_DOMAIN_ID=42
     export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
@@ -593,13 +584,15 @@ EOF
     export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
     export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
 
-    # 2) Activate venv with VGGT + Mask2Former
-    source /venvs/vggt-m2f/bin/activate
+    # 2) ROS Python paths
+    export ROS_PYTHONPATH="/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages"
+    export PYTHONPATH="${ROS_PYTHONPATH}:${PYTHONPATH}"
 
-    # Also add VGGT-SLAM + salad + mask2former to module search
+    # 3) Activate venv
+    source /venvs/vggt-m2f/bin/activate
     export PYTHONPATH="'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:'"${VGGT_SLAM_ROOT}"'/mask2former:${PYTHONPATH}"
 
-    # FiLM + semantic head envs
+    # FiLM + semantic
     export VGGT_FUSE_FILM=1
     export VGGT_FUSE_FILM_BLEND=0
     export VGGT_FUSE_FILM_MODE=passive
@@ -614,27 +607,27 @@ EOF
     export VGGT_PIPELINE_CHECK=1
     export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
 
-    # 3) Sanity check: CUDA + ROS imports
+    # Sanity check
     python - << "PY"
-import sys, os, torch
-print("python:", sys.executable)
-print("CUDA version:", torch.version.cuda)
-print("GPU available:", torch.cuda.is_available())
-print("CUDA_VISIBLE_DEVICES:", os.getenv("CUDA_VISIBLE_DEVICES"))
-print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
-print("Semantic head:", os.getenv("VGGT_SEMANTIC_HEAD"))
+  import sys, os, torch
+  print("python:", sys.executable)
+  print("CUDA version:", torch.version.cuda)
+  print("GPU available:", torch.cuda.is_available())
+  print("CUDA_VISIBLE_DEVICES:", os.getenv("CUDA_VISIBLE_DEVICES"))
+  print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
+  print("Semantic head:", os.getenv("VGGT_SEMANTIC_HEAD"))
 
-try:
-    import rclpy
-    from sensor_msgs.msg import Image
-    import cv_bridge
-    print("ROS2 Python imports: OK (rclpy, sensor_msgs, cv_bridge)")
-except Exception as e:
-    print("ROS2 Python import FAILED:", e)
-    raise
-PY
+  try:
+      import rclpy
+      from sensor_msgs.msg import Image
+      import cv_bridge
+      print("ROS2 Python imports: OK (rclpy, sensor_msgs, cv_bridge)")
+  except Exception as e:
+      print("ROS2 Python import FAILED:", e)
+      raise
+  PY
 
-    # 4) Run live ROS2 pipeline
+    # 4) Run live node
     python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
       --ros_image_topic /camera/image_color \
       --ros_info_topic  /camera/camera_info \
