@@ -513,3 +513,126 @@ vggt_offline_test () {
     --vis_map \
     --conf_threshold 30.0
 }
+
+run_vggt_m2f () {
+  # Clean environment, as usual
+  cleanenv 2>/dev/null || true
+
+  # Load Singularity (container with ROS2 Humble + perception stack)
+  if command -v module >/dev/null 2>&1; then
+    module load singularity/3.9.5 2>/dev/null || true
+  fi
+
+  # Bind a GPU if none is set yet
+  if ! command -v _vggt_bind_gpu >/dev/null 2>&1; then
+    echo "[run_vggt_m2f] WARNING: _vggt_bind_gpu not found; running without auto GPU binding." >&2
+  else
+    _vggt_bind_gpu
+  fi
+
+  # Default paths if not already exported
+  export VGGT_VENV_DIR="${VGGT_VENV_DIR:-$HOME/.venvs}"
+  export VGGT_SLAM_ROOT="${VGGT_SLAM_ROOT:-$HOME/src/VGGT-SLAM}"
+
+  # Networking for FastDDS (same as your old function)
+  GPU_IP=$(
+    hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }'
+  )
+  CPU_IP="130.89.6.254"
+
+  cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="unicast_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>udp_only</transport_id></userTransports>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>${CPU_IP}</address></udpv4></locator>
+          <locator><udpv4><address>${GPU_IP}</address></udpv4></locator>
+        </initialPeersList>
+        <avoid_builtin_multicast>true</avoid_builtin_multicast>
+      </builtin>
+      <throughputController>
+        <bytesPerPeriod>2097152</bytesPerPeriod>
+        <periodMillisecs>0</periodMillisecs>
+      </throughputController>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+
+  local SIF="${HOME}/containers/ros_humble_perception.sif"
+  local libffi_dir="/usr/lib/x86_64-linux-gnu"  # good default on these nodes
+
+  local binds=(
+    --bind "${VGGT_VENV_DIR}:/venvs"
+    --bind "${VGGT_SLAM_ROOT}:${VGGT_SLAM_ROOT}"
+    --bind "${libffi_dir}:${libffi_dir}"
+  )
+  [ -d "${HOME}/models" ] && binds+=( --bind "${HOME}/models:${HOME}/models" )
+
+  singularity exec --nv --cleanenv "${binds[@]}" "${SIF}" bash -lc '
+    set -eE -o pipefail
+
+    # ROS2 setup inside container
+    set +u; source /opt/ros/humble/setup.bash; set -u
+
+    # Make sure libffi from host is visible (avoids rclpy/libffi weirdness)
+    export LD_LIBRARY_PATH="'"${libffi_dir}"':${LD_LIBRARY_PATH:-}"
+
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+
+    # Python path: VGGT-SLAM core + salad + mask2former
+    export PYTHONPATH="'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:'"${VGGT_SLAM_ROOT}"'/mask2former:${PYTHONPATH}"
+
+    # FiLM + semantic head envs (same as before)
+    export VGGT_FUSE_FILM=1
+    export VGGT_FUSE_FILM_BLEND=0
+    export VGGT_FUSE_FILM_MODE=passive
+    export VGGT_FUSE_FILM_HIDDEN=512
+    export VGGT_FUSE_FILM_ALPHA=0.30
+    export VGGT_FUSE_FILM_TEST=1
+
+    export VGGT_SEMANTIC_HEAD=1
+    export VGGT_SEM_CLASSES=20
+    export VGGT_SEM_QUERIES=50
+
+    export VGGT_PIPELINE_CHECK=1
+    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
+
+    # Activate the shared venv with VGGT + Mask2Former
+    source /venvs/vggt-m2f/bin/activate
+
+    # Small sanity print
+    python - << "PY"
+import sys, torch, os
+print("python:", sys.executable)
+print("CUDA version:", torch.version.cuda)
+print("GPU available:", torch.cuda.is_available())
+print("CUDA_VISIBLE_DEVICES:", os.getenv("CUDA_VISIBLE_DEVICES"))
+print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
+print("Semantic head:", os.getenv("VGGT_SEMANTIC_HEAD"))
+PY
+
+    # Finally run the live ROS2 pipeline
+    python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
+      --ros_image_topic /camera/image_color \
+      --ros_info_topic  /camera/camera_info \
+      --window_size 15 --overlapping_window_size 1 \
+      --target_fps 2.0 --ros2_queue_size 60 \
+      --local_model "$HOME/models/VGGT-1B/model.pt" \
+      --log_results
+  '
+}
