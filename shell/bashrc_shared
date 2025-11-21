@@ -515,23 +515,27 @@ vggt_offline_test () {
 }
 
 run_vggt_m2f () {
+  # 0) Clean env + bind a GPU if helper exists
   cleanenv 2>/dev/null || true
 
+  # If you have the helper defined, let it pick a GPU and set CUDA_VISIBLE_DEVICES
+  if type _vggt_bind_gpu >/dev/null 2>&1; then
+    _vggt_bind_gpu
+  fi
+
+  # 1) Basic paths
+  export VGGT_VENV_DIR="${VGGT_VENV_DIR:-$HOME/.venvs}"
+  export VGGT_SLAM_ROOT="${VGGT_SLAM_ROOT:-$HOME/src/VGGT-SLAM}"
+
+  # 2) Load Singularity
   if command -v module >/dev/null 2>&1; then
     module load singularity/3.9.5 2>/dev/null || true
   fi
 
-  if command -v _vggt_bind_gpu >/dev/null 2>&1; then
-    _vggt_bind_gpu
-  fi
-
-  export VGGT_VENV_DIR="${VGGT_VENV_DIR:-$HOME/.venvs}"
-  export VGGT_SLAM_ROOT="${VGGT_SLAM_ROOT:-$HOME/src/VGGT-SLAM}"
-
-  GPU_IP=$(
-    hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }'
-  )
-  CPU_IP="130.89.6.254"
+  # 3) ROS2 FastDDS unicast config (GPU node talks to CPU node)
+  local GPU_IP
+  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
+  local CPU_IP="130.89.6.254"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -562,6 +566,7 @@ run_vggt_m2f () {
 </profiles>
 EOF
 
+  # 4) Container + binds
   local SIF="${HOME}/containers/ros_humble_perception.sif"
   local binds=(
     --bind "${VGGT_VENV_DIR}:/venvs"
@@ -569,71 +574,78 @@ EOF
   )
   [ -d "${HOME}/models" ] && binds+=( --bind "${HOME}/models:${HOME}/models" )
 
-  singularity exec --nv --cleanenv "${binds[@]}" "${SIF}" bash -lc '
-    set -eE -o pipefail
+  # 5) Run inside Singularity
+  singularity exec --nv --cleanenv \
+    --env VGGT_SLAM_ROOT="${VGGT_SLAM_ROOT}" \
+    --env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
+    "${binds[@]}" "${SIF}" bash -lc '
+      set -eE -o pipefail
 
-    # 1) ROS2 environment
-    set +u; source /opt/ros/humble/setup.bash; set -u
+      # 5a) ROS2 environment
+      set +u; source /opt/ros/humble/setup.bash; set -u
 
-    # Make sure system libs (including libspdlog + libffi) are on the path
-    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+      # Make sure system libs (includes libspdlog, libffi from inside container) are visible
+      export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 
-    export ROS_DOMAIN_ID=42
-    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-    export ROS_LOCALHOST_ONLY=0
-    export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
-    export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+      export ROS_DOMAIN_ID=42
+      export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      export ROS_LOCALHOST_ONLY=0
+      export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+      export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
 
-    # 2) ROS Python paths
-    export ROS_PYTHONPATH="/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages"
-    export PYTHONPATH="${ROS_PYTHONPATH}:${PYTHONPATH}"
+      # 5b) ROS Python packages
+      export ROS_PYTHONPATH="/opt/ros/humble/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages"
+      export PYTHONPATH="${ROS_PYTHONPATH}:${PYTHONPATH}"
 
-    # 3) Activate venv
-    source /venvs/vggt-m2f/bin/activate
-    export PYTHONPATH="'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:'"${VGGT_SLAM_ROOT}"'/mask2former:${PYTHONPATH}"
+      # 5c) Activate shared venv (mask2former + VGGT-SLAM)
+      source /venvs/vggt-m2f/bin/activate
 
-    # FiLM + semantic
-    export VGGT_FUSE_FILM=1
-    export VGGT_FUSE_FILM_BLEND=0
-    export VGGT_FUSE_FILM_MODE=passive
-    export VGGT_FUSE_FILM_HIDDEN=512
-    export VGGT_FUSE_FILM_ALPHA=0.30
-    export VGGT_FUSE_FILM_TEST=1
+      # Make repo modules importable
+      export PYTHONPATH="${VGGT_SLAM_ROOT}:${VGGT_SLAM_ROOT}/salad:${VGGT_SLAM_ROOT}/mask2former:${PYTHONPATH}"
 
-    export VGGT_SEMANTIC_HEAD=1
-    export VGGT_SEM_CLASSES=20
-    export VGGT_SEM_QUERIES=50
+      # 5d) FiLM + semantic head settings
+      export VGGT_FUSE_FILM=1
+      export VGGT_FUSE_FILM_BLEND=0
+      export VGGT_FUSE_FILM_MODE=passive
+      export VGGT_FUSE_FILM_HIDDEN=512
+      export VGGT_FUSE_FILM_ALPHA=0.30
+      export VGGT_FUSE_FILM_TEST=1
 
-    export VGGT_PIPELINE_CHECK=1
-    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
+      export VGGT_SEMANTIC_HEAD=1
+      export VGGT_SEM_CLASSES=20
+      export VGGT_SEM_QUERIES=50
 
-    # Sanity check
-    python - << "PY"
-  import sys, os, torch
-  print("python:", sys.executable)
-  print("CUDA version:", torch.version.cuda)
-  print("GPU available:", torch.cuda.is_available())
-  print("CUDA_VISIBLE_DEVICES:", os.getenv("CUDA_VISIBLE_DEVICES"))
-  print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
-  print("Semantic head:", os.getenv("VGGT_SEMANTIC_HEAD"))
+      export VGGT_PIPELINE_CHECK=1
+      export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
 
-  try:
-      import rclpy
-      from sensor_msgs.msg import Image
-      import cv_bridge
-      print("ROS2 Python imports: OK (rclpy, sensor_msgs, cv_bridge)")
-  except Exception as e:
-      print("ROS2 Python import FAILED:", e)
-      raise
-  PY
+      # 5e) Sanity check: CUDA + ROS2 imports
+      python - <<PY
+import sys, os, torch
 
-    # 4) Run live node
-    python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
-      --ros_image_topic /camera/image_color \
-      --ros_info_topic  /camera/camera_info \
-      --window_size 15 --overlapping_window_size 1 \
-      --target_fps 2.0 --ros2_queue_size 60 \
-      --local_model "$HOME/models/VGGT-1B/model.pt" \
-      --log_results
-  '
+print("python:", sys.executable)
+print("CUDA version:", torch.version.cuda)
+print("GPU available:", torch.cuda.is_available())
+print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
+print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
+print("Semantic head:", os.getenv("VGGT_SEMANTIC_HEAD"))
+
+try:
+    import rclpy
+    from sensor_msgs.msg import Image
+    import cv_bridge
+    print("ROS2 Python imports: OK (rclpy, sensor_msgs, cv_bridge)")
+except Exception as e:
+    print("ROS2 Python import FAILED:", e)
+    raise
+PY
+
+      # 5f) Run live stream node
+      python "${VGGT_SLAM_ROOT}/main_live_stream.py" --live \
+        --ros_image_topic /camera/image_color \
+        --ros_info_topic  /camera/camera_info \
+        --window_size 15 --overlapping_window_size 1 \
+        --target_fps 2.0 --ros2_queue_size 60 \
+        --local_model "$HOME/models/VGGT-1B/model.pt" \
+        --log_results
+    '
 }
