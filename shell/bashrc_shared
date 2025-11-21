@@ -133,6 +133,387 @@ PY
 
 export SINGULARITYENV_PYTHONWARNINGS="ignore:xFormers is available:UserWarning,ignore:xFormers is not available:UserWarning"
 
+run_vggt () {
+  cleanenv 2>/dev/null || true
+  if command -v module >/dev/null 2>&1; then
+    module load singularity/3.9.5 2>/dev/null || true
+  fi
+
+  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
+  CPU_IP="130.89.6.254"
+
+  cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="unicast_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>udp_only</transport_id></userTransports>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>${CPU_IP}</address></udpv4></locator>
+          <locator><udpv4><address>${GPU_IP}</address></udpv4></locator>
+        </initialPeersList>
+        <avoid_builtin_multicast>true</avoid_builtin_multicast>
+      </builtin>
+      <throughputController>
+        <bytesPerPeriod>2097152</bytesPerPeriod>
+        <periodMillisecs>0</periodMillisecs>
+      </throughputController>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+
+  local SIF="${HOME}/containers/ros_humble_perception.sif"
+  local binds=( --bind "${VGGT_VENV_DIR}:/venvs" --bind "${VGGT_SLAM_ROOT}:${VGGT_SLAM_ROOT}" )
+  [ -d "${HOME}/models" ] && binds+=( --bind "${HOME}/models:${HOME}/models" )
+
+  singularity exec --nv --cleanenv "${binds[@]}" "${SIF}" bash -lc '
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+
+    export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:$PYTHONPATH"
+
+    export VGGT_FUSE_FILM=1
+    export VGGT_FUSE_FILM_BLEND=0
+    export VGGT_FUSE_FILM_MODE=passive
+    export VGGT_FUSE_FILM_HIDDEN=512
+    export VGGT_FUSE_FILM_ALPHA=0.30
+    export VGGT_FUSE_FILM_TEST=1
+
+    export VGGT_SEMANTIC_HEAD=1
+    export VGGT_SEM_CLASSES=20
+    export VGGT_SEM_QUERIES=50
+
+    export VGGT_PIPELINE_CHECK=1
+    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
+
+    /venvs/vggt/bin/python - <<'"'"'PY'"'"'
+import sys, torch, os
+print("python:", sys.executable)
+print("CUDA:", torch.version.cuda, "GPU?", torch.cuda.is_available())
+print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
+print("FiLM blend  :", os.getenv("VGGT_FUSE_FILM_BLEND"))
+print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
+PY
+
+    /venvs/vggt/bin/python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
+      --ros_image_topic /camera/image_color \
+      --ros_info_topic  /camera/camera_info \
+      --window_size 15 --overlapping_window_size 1 \
+      --target_fps 2.0 --ros2_queue_size 60 \
+      --local_model "$HOME/models/VGGT-1B/model.pt" \
+      --log_results
+  '
+}
+
+
+gpu_node_env () {
+  if command -v module >/dev/null 2>&1; then
+    module purge || true
+    module load "${PYTHON_MODULE:-python/3.10.7}" "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
+  fi
+
+  : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
+  : "${VGGT_SLAM_ROOT:=${HOME}/src/VGGT-SLAM}"
+  : "${AUTO_PICK_GPU:=1}"
+  : "${VGGT_GPU_VENV:=gpu-node}"
+  : "${VGGT_CUDA_HOME:=/opt/nvidia/cuda-12.4}"
+
+  local env_name="${1:-${VGGT_GPU_VENV}}"
+  local VENV_PATH="${VGGT_VENV_DIR}/${env_name}"
+  [ -d "${VENV_PATH}" ] || { echo "[gpu_node_env] venv missing at ${VENV_PATH}" >&2; return 1; }
+  . "${VENV_PATH}/bin/activate"
+
+  export CUDA_HOME="${VGGT_CUDA_HOME}"
+  export PATH="${CUDA_HOME}/bin:${PATH}"
+  export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9;9.0;8.6}"  # L40=8.9, H100=9.0, A40=8.6
+  export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+  _vggt_bind_gpu
+
+  echo "[gpu_node_env] ✅ Activated ($(python -V)), CUDA_HOME=${CUDA_HOME}, CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+}
+
+
+# Utility: best-effort CUDA binding (Slurm-aware, falls back to utilisation-based pick).
+_vggt_bind_gpu () {
+  local auto_pick="${AUTO_PICK_GPU:-1}"
+  export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+  if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    return
+  fi
+
+  local slurm_gpus="${SLURM_STEP_GPUS:-${SLURM_JOB_GPUS:-}}"
+  if [ -n "$slurm_gpus" ]; then
+    slurm_gpus="${slurm_gpus//,/ }"
+    if echo "$slurm_gpus" | grep -Eq '^[0-9 ]+$'; then
+      export CUDA_VISIBLE_DEVICES="$(echo "$slurm_gpus" | awk '{print $1}')"
+    elif command -v nvidia-smi >/dev/null 2>&1; then
+      while read -r idx uuid; do
+        for u in $slurm_gpus; do
+          if [ "$u" = "$uuid" ]; then
+            export CUDA_VISIBLE_DEVICES="$idx"
+            break 2
+          fi
+        done
+      done < <(nvidia-smi -L | awk -F'[(): ]+' '/UUID/{printf "%s %s\n",$3,$7}')
+    fi
+  fi
+
+  if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && [ "$auto_pick" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    local best="" bestscore=""
+    while IFS=',' read -r idx uuid mem util; do
+      idx="${idx//[[:space:]]/}"
+      mem="${mem//[[:space:]]/}"
+      util="${util//[[:space:]]/}"
+      local score
+      score=$(printf "%012d-%03d" "$mem" "$util")
+      if [ -z "$bestscore" ] || [ "$score" \< "$bestscore" ]; then
+        bestscore="$score"
+        best="$idx"
+      fi
+    done < <(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
+    [ -n "$best" ] && export CUDA_VISIBLE_DEVICES="$best"
+  fi
+}
+
+vggt_env () {
+  local env_name="${1:-${VGGT_SLAM_ENV:-vggt-slam}}"
+
+  if command -v module >/dev/null 2>&1; then
+    module purge || true
+    module load "${PYTHON_MODULE:-python/3.10.7}" "${CUDA_MODULE:-nvidia/cuda-12.4}" 2>/dev/null || true
+  fi
+
+  : "${VGGT_VENV_DIR:=${HOME}/.venvs}"
+  local venv_path="${VGGT_VENV_DIR}/${env_name}"
+  if [ ! -d "${venv_path}" ]; then
+    echo "[vggt_env] venv missing at ${venv_path}" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC1090
+  . "${venv_path}/bin/activate"
+
+  if [ -z "${CUDA_HOME:-}" ] && [ -d "/opt/nvidia/cuda-12.4" ]; then
+    export CUDA_HOME="/opt/nvidia/cuda-12.4"
+  fi
+  if [ -n "${CUDA_HOME:-}" ]; then
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+  fi
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6;8.9;9.0}"
+
+  _vggt_bind_gpu
+
+  echo "[vggt_env] ✅ Activated ($(python -V)), CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+}
+
+mask2former_env () {
+  # Allow override, but default venv name = "mask2former"
+  local env_name="${1:-${VGGT_MASK2FORMER_ENV:-mask2former}}"
+
+  # This env was built with CUDA 11.8 → keep it consistent
+  export PYTHON_MODULE="python/3.10.7"
+  export CUDA_MODULE="nvidia/cuda-11.8"
+
+  # Keep CUDA_HOME pinned to 11.8; vggt_env only sets it if empty
+  export CUDA_HOME="/deepstore/software/nvidia/cuda-11.8"
+
+  # Activate via the shared helper (modules, venv, GPU binding, arch list…)
+  vggt_env "${env_name}" || return $?
+
+  # Mask2Former-specific extras
+  export PYTHONPATH="${HOME}/src/VGGT-SLAM/mask2former:${PYTHONPATH}"
+  export MASK2FORMER_SKIP_DATA=1
+
+  echo "[mask2former_env] ✅ Activated env='${env_name}' (CUDA 11.8, torch $(python - << 'PY'
+import torch
+print(torch.__version__, end="")
+PY
+))"
+}
+
+# Shared env for VGGT-SLAM + Mask2Former
+vggt_m2f_env () {
+  cleanenv 2>/dev/null || true
+
+  # 1) Modules
+  if command -v module >/dev/null 2>&1; then
+    module load python/3.10.7 nvidia/cuda-11.8 2>/dev/null || true
+  fi
+
+  # 2) Activate venv
+  local VENV_PATH="$HOME/.venvs/vggt-m2f"
+  if [ ! -d "$VENV_PATH" ]; then
+    echo "[vggt_m2f_env] Missing venv at $VENV_PATH" >&2
+    return 1
+  fi
+  # shellcheck disable=SC1090
+  source "$VENV_PATH/bin/activate"
+
+  # 3) Paths
+  export VGGT_SLAM_ROOT="$HOME/src/VGGT-SLAM"
+  export CUDA_HOME=/deepstore/software/nvidia/cuda-11.8
+  export PATH="$CUDA_HOME/bin:$PATH"
+  export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+
+  # VGGT-SLAM core + salad + mask2former
+  export PYTHONPATH="$VGGT_SLAM_ROOT:$VGGT_SLAM_ROOT/salad:$VGGT_SLAM_ROOT/mask2former:${PYTHONPATH}"
+
+  # Mask2Former convenience
+  export MASK2FORMER_SKIP_DATA=1
+
+  # 4) Bind a GPU (uses your existing helper)
+  if type _vggt_bind_gpu >/dev/null 2>&1; then
+    _vggt_bind_gpu
+  fi
+
+  echo "[vggt_m2f_env] python: $(python -V 2>/dev/null)"
+  echo "[vggt_m2f_env] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-none}"
+  echo "[vggt_m2f_env] VGGT_SLAM_ROOT=$VGGT_SLAM_ROOT"
+}
+
+
+# Start a SOCKS5 tunnel from the current GPU node back to the head node.
+# Usage (on GPU node): hpc_gpu_tunnel_start [port]
+hpc_gpu_tunnel_start () {
+  local port="${1:-1080}"
+  local head_host="${HPC_HEAD_HOST:-hpc-head1.ewi.utwente.nl}"
+  local head_user="${HPC_HEAD_USER:-$USER}"
+  local node
+
+  node="$(hostname -s 2>/dev/null || hostname)"
+  echo "$node" > "$HOME/.hpc_last_gpu_node"
+
+  echo "[hpc_gpu_tunnel_start] GPU node: $node"
+  echo "[hpc_gpu_tunnel_start] Saved to \$HOME/.hpc_last_gpu_node"
+  echo "[hpc_gpu_tunnel_start] Opening SOCKS5 tunnel on 127.0.0.1:${port} → ${head_user}@${head_host}"
+  echo "[hpc_gpu_tunnel_start] Keep this terminal open; Ctrl+C to stop the tunnel."
+
+  # -N = no remote command; just port forwarding
+  ssh -N -D "127.0.0.1:${port}" "${head_user}@${head_host}"
+  # ssh -D "127.0.0.1:${port}" "${head_user}@${head_host}"
+}
+
+# SSH into the last GPU node we recorded.
+# Usage (on head): hpc_gpu_ssh_last
+hpc_gpu_ssh_last () {
+  local node_file="$HOME/.hpc_last_gpu_node"
+
+  if [ ! -f "$node_file" ]; then
+    echo "[hpc_gpu_ssh_last] No \$HOME/.hpc_last_gpu_node found. Run hpc_gpu_tunnel_start on a GPU node first." >&2
+    return 1
+  fi
+
+  local node
+  node="$(cat "$node_file")"
+  if [ -z "$node" ]; then
+    echo "[hpc_gpu_ssh_last] Empty node name in $node_file" >&2
+    return 1
+  fi
+
+  echo "[hpc_gpu_ssh_last] SSH to GPU node: $node"
+  ssh "${USER}@${node}"
+}
+
+# Set HTTP(S) proxies to use the local SOCKS tunnel on this GPU node.
+# Usage (on GPU node): hpc_gpu_proxy_on [port]
+hpc_gpu_proxy_on () {
+  local port="${1:-1080}"
+  local proxy="socks5h://127.0.0.1:${port}"
+
+  export http_proxy="$proxy"
+  export https_proxy="$proxy"
+  export HTTP_PROXY="$proxy"
+  export HTTPS_PROXY="$proxy"
+
+  echo "[hpc_gpu_proxy_on] Proxies set to $proxy"
+
+  # Quick connectivity sanity check (optional)
+  if command -v curl >/dev/null 2>&1; then
+    if curl -s https://pypi.org/simple/detectron2/ >/dev/null; then
+      echo "[hpc_gpu_proxy_on] Connectivity test OK (PyPI reachable)."
+    else
+      echo "[hpc_gpu_proxy_on] WARNING: Connectivity test failed (PyPI not reachable)." >&2
+    fi
+  fi
+}
+
+# Unset HTTP(S) proxies.
+# Usage (on GPU node): hpc_gpu_proxy_off
+hpc_gpu_proxy_off () {
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+  echo "[hpc_gpu_proxy_off] Proxies unset."
+}
+
+
+
+
+########## TESTS ##########
+
+
+# Quick Mask2Former smoke test helper
+m2f_smoke_test () {
+  vggt_m2f_env || return 1
+  cd "$VGGT_SLAM_ROOT" || return 1
+
+  python - << 'PY'
+import numpy as np, torch
+from detectron2.config import get_cfg
+from detectron2.projects.deeplab import add_deeplab_config
+from detectron2.engine import DefaultPredictor
+from mask2former import add_maskformer2_config
+
+cfg = get_cfg()
+add_deeplab_config(cfg)
+add_maskformer2_config(cfg)
+cfg.merge_from_file("mask2former/configs/coco/panoptic-segmentation/maskformer2_R50_bs16_50ep.yaml")
+cfg.INPUT.MIN_SIZE_TEST = cfg.INPUT.MAX_SIZE_TEST = 256
+cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+cfg.MODEL.WEIGHTS = ""
+predictor = DefaultPredictor(cfg)
+
+dummy = (np.random.rand(256, 256, 3) * 255).astype("uint8")
+with torch.no_grad():
+    outputs = predictor(dummy)
+panoptic, _ = outputs["panoptic_seg"]
+print("Panoptic output shape:", tuple(panoptic.shape))
+print("Semantic logits shape:", tuple(outputs["sem_seg"].shape))
+print("Instances summary:", outputs["instances"])
+PY
+}
+
+# Quick non-ROS VGGT run (your test entrypoint)
+vggt_offline_test () {
+  vggt_m2f_env || return 1
+  cd "$VGGT_SLAM_ROOT" || return 1
+
+  python main.py \
+    --image_folder /home/s2984792/scannetpp/data/5a269ba6fe/dslr/resized_undistorted_images \
+    --max_loops 2 \
+    --submap_size 40 \
+    --log_results \
+    --vis_map \
+    --conf_threshold 30.0
+}
+
 run_vggt_m2f () {
   # 0) Clean env + bind a GPU if helper exists
   cleanenv 2>/dev/null || true
