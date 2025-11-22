@@ -1,33 +1,36 @@
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 
 from .semantic_head import SemanticHead
 
-_SEM_REGISTRY = {"head": None}
+_SEM_REGISTRY: Dict[str, SemanticHead] = {}
 
 
-def _resolve_dtype(device: torch.device) -> torch.dtype:
-    precision = os.getenv("VGGT_M2F_PRECISION", "fp32").lower()
-    if precision in {"fp16", "half"} and device.type == "cuda":
-        return torch.float16
-    return torch.float32
+def _maybe_int(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _get_semantic_head(device: torch.device) -> SemanticHead:
-    head = _SEM_REGISTRY.get("head")
+    device_id = getattr(device, "index", None)
+    key = f"{device.type}:{device_id}"
+    head = _SEM_REGISTRY.get(key)
     if head is None:
-        model_id = os.getenv("VGGT_M2F_MODEL_ID", "facebook/mask2former-swin-base-ade-semantic")
-        trust_remote = os.getenv("VGGT_M2F_TRUST_REMOTE_CODE", "0") == "1"
         head = SemanticHead(
-            model_id=model_id,
             device=device,
-            torch_dtype=_resolve_dtype(device),
-            trust_remote_code=trust_remote,
+            config_path=os.getenv("VGGT_M2F_CFG"),
+            weights_path=os.getenv("VGGT_M2F_WEIGHTS"),
+            num_classes=_maybe_int(os.getenv("VGGT_SEM_CLASSES")),
+            num_queries=_maybe_int(os.getenv("VGGT_SEM_QUERIES")),
         )
         head.eval()
-        _SEM_REGISTRY["head"] = head
+        _SEM_REGISTRY[key] = head
     return head
 
 
@@ -69,9 +72,15 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
     if not frame_indices:
         return
 
-    images_subset = images[:, frame_indices, ...]
     head = _get_semantic_head(device)
-    cls_logits, mask_logits, semantic_maps = head(images_subset)
+    film_pyramid = predictions.get("film_pyramid")
+    if not film_pyramid:
+        return
+    cls_logits, mask_logits, semantic_maps = head(
+        images,
+        frame_indices=frame_indices,
+        film_pyramid=film_pyramid,
+    )
 
     predictions["sem_frame_indices"] = frame_indices
     predictions["sem_cls_logits"] = cls_logits

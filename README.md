@@ -118,21 +118,20 @@ be sufficient for alignment (see paper for in depth discussion on the advantages
 
 ### Mask2Former Semantic Head
 
-We now ship a plug-and-play Mask2Former head powered by the Hugging Face
-`Mask2FormerForUniversalSegmentation` implementation. Enable it by exporting
-`VGGT_SEMANTIC_HEAD=1` before running VGGT-SLAM — the runner will automatically
-download the default `facebook/mask2former-swin-base-ade-semantic` checkpoint.
+Enable semantic predictions by exporting `VGGT_SEMANTIC_HEAD=1` before running
+VGGT-SLAM. The runner will tap the FiLM fused pyramid from the depth head and
+feed it into the Detectron2 Mask2Former implementation (same configs shipped
+with the `mask2former` submodule). By default it uses
+`maskformer2_R50_bs16_50ep.yaml`, but you can override the setup with env vars:
 
-Useful knobs (all optional):
-
-- `VGGT_M2F_MODEL_ID`: Any HF model id compatible with
-  `Mask2FormerForUniversalSegmentation` (e.g., cityscapes or COCO variants).
-- `VGGT_M2F_PRECISION`: `fp32` (default) or `fp16` when running on CUDA devices.
+- `VGGT_M2F_CFG`: path to a Mask2Former config file (defaults to the COCO R50
+  config in `mask2former/configs`).
+- `VGGT_M2F_WEIGHTS`: optional `.pth` checkpoint compatible with the config.
+- `VGGT_SEM_CLASSES`: override the number of semantic classes if needed.
+- `VGGT_SEM_QUERIES`: override the number of object queries.
 - `VGGT_SEM_FRAME_MODE`: `last` (default), `first`, or `all` to control which
   frames of a sequence get segmented. For arbitrary frames, set
   `VGGT_SEM_FRAME_INDEX` to a specific (possibly negative) index.
-- `VGGT_M2F_TRUST_REMOTE_CODE`: Set to `1` only if the chosen checkpoint
-  requires custom model code.
 
 The resulting logits, mask proposals, semantic maps, and frame indices are
 attached to the predictions dict (`sem_cls_logits`, `sem_mask_logits`,

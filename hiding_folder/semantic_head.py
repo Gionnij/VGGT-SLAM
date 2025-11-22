@@ -1,93 +1,152 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Tuple
+from pathlib import Path
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import Mask2FormerForUniversalSegmentation, Mask2FormerImageProcessor
+import torch.nn.functional as F
 
-if TYPE_CHECKING:
-    import numpy as np
-
-
-def _to_numpy_images(batch: torch.Tensor) -> Tuple[List["np.ndarray"], List[Tuple[int, int]]]:
-    """
-    Convert a (N, 3, H, W) float tensor in [0, 1] to a list of uint8 HWC numpy arrays.
-    """
-    if batch.ndim != 4:
-        raise ValueError(f"Expected tensor of shape (N, 3, H, W), got {tuple(batch.shape)}")
-
-    batch = batch.detach().cpu().clamp(0, 1)
-    np_images: List["np.ndarray"] = []
-    sizes: List[Tuple[int, int]] = []
-    for img in batch:
-        arr = (img * 255.0).to(torch.uint8).permute(1, 2, 0).numpy()
-        np_images.append(arr)
-        sizes.append((arr.shape[0], arr.shape[1]))
-    return np_images, sizes
+try:
+    from detectron2.config import get_cfg
+    from detectron2.layers import ShapeSpec
+    from detectron2.modeling import build_sem_seg_head
+    from mask2former import add_maskformer2_config
+except Exception:  # pragma: no cover - optional dependency
+    get_cfg = None  # type: ignore[assignment]
+    ShapeSpec = None  # type: ignore[assignment]
+    build_sem_seg_head = None  # type: ignore[assignment]
+    add_maskformer2_config = None  # type: ignore[assignment]
 
 
 class SemanticHead(nn.Module):
     """
-    Thin wrapper around Hugging Face's Mask2Former implementation.
+    Runs Detectron2's Mask2Former head directly on FiLM fused feature maps.
     """
+
+    _DEFAULT_CFG = (
+        Path(__file__).resolve().parents[1]
+        / "mask2former"
+        / "configs"
+        / "coco"
+        / "panoptic-segmentation"
+        / "maskformer2_R50_bs16_50ep.yaml"
+    )
 
     def __init__(
         self,
-        model_id: str,
+        *,
         device: torch.device,
-        torch_dtype: torch.dtype = torch.float32,
-        trust_remote_code: bool = False,
+        config_path: Optional[str] = None,
+        weights_path: Optional[str] = None,
+        num_classes: Optional[int] = None,
+        num_queries: Optional[int] = None,
     ) -> None:
         super().__init__()
-        self.model_id = model_id
-        self.processor = Mask2FormerImageProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
-        self.model = Mask2FormerForUniversalSegmentation.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            trust_remote_code=trust_remote_code,
-        )
-        self.to(device)
-        self._model_device = next(self.model.parameters()).device
+        if get_cfg is None or build_sem_seg_head is None or add_maskformer2_config is None or ShapeSpec is None:
+            raise ImportError(
+                "detectron2/mask2former dependencies are missing. "
+                "Ensure the mask2former submodule and detectron2 are on PYTHONPATH."
+            )
 
-    @torch.no_grad()
+        cfg = get_cfg()
+        add_maskformer2_config(cfg)
+        cfg_path = Path(config_path).expanduser() if config_path else self._DEFAULT_CFG
+        if not cfg_path.is_file():
+            raise FileNotFoundError(f"Mask2Former config not found at {cfg_path}")
+        cfg.merge_from_file(str(cfg_path))
+
+        if num_classes is not None:
+            cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = int(num_classes)
+        if num_queries is not None:
+            cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES = int(num_queries)
+        cfg.MODEL.SEM_SEG_HEAD.IN_FEATURES = ["res2", "res3", "res4", "res5"]
+        cfg.MODEL.DEVICE = "cuda" if device.type == "cuda" else "cpu"
+        cfg.freeze()
+
+        self._input_shapes: Dict[str, ShapeSpec] = {
+            "res2": ShapeSpec(channels=256, stride=8),
+            "res3": ShapeSpec(channels=512, stride=16),
+            "res4": ShapeSpec(channels=1024, stride=32),
+            "res5": ShapeSpec(channels=1024, stride=64),
+        }
+        self.device = device
+        self.head = build_sem_seg_head(cfg, self._input_shapes).to(device)
+        self.head.eval()
+        if weights_path:
+            self._load_head_weights(weights_path)
+
+        self.scales = [8, 16, 32, 64]
+
+    def _load_head_weights(self, weights_path: str) -> None:
+        path = Path(weights_path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"Mask2Former weights not found at {path}")
+        state = torch.load(path, map_location="cpu")
+        if isinstance(state, dict) and "model" in state:
+            state = state["model"]
+        head_state = {k.replace("sem_seg_head.", "", 1): v for k, v in state.items() if k.startswith("sem_seg_head.")}
+        missing, unexpected = self.head.load_state_dict(head_state, strict=False)
+        if missing:
+            print(f"[SEM] Missing weights for keys: {missing}")
+        if unexpected:
+            print(f"[SEM] Unexpected weight keys ignored: {unexpected}")
+
     def forward(
         self,
         images: torch.Tensor,
+        *,
+        frame_indices: Sequence[int],
+        film_pyramid: Sequence[Optional[torch.Tensor]],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            images: tensor shaped (B, S, 3, H, W) in [0, 1].
-
-        Returns:
-            cls_logits: (B, S, Q, K)
-            mask_logits: (B, S, Q, H/4, W/4)
-            semantic_maps: (B, S, H, W) long tensor with per-pixel class ids
-        """
         if images.ndim != 5:
             raise ValueError(f"Expected tensor of shape (B, S, 3, H, W), got {tuple(images.shape)}")
+        if not frame_indices:
+            raise ValueError("At least one frame index is required for semantic inference.")
+        if len(film_pyramid) < 4 or any(level is None for level in film_pyramid[:4]):
+            raise ValueError("FiLM pyramid is missing levels; ensure FiLM is enabled.")
 
-        B, S = images.shape[:2]
-        if B == 0 or S == 0:
-            raise ValueError("SemanticHead received an empty sequence of images.")
+        B = images.shape[0]
+        H, W = images.shape[-2:]
+        features, batch, num_frames = self._build_feature_dict(film_pyramid, frame_indices, target_hw=(H, W))
+        outputs = self.head(features)
 
-        flat = images.reshape(B * S, *images.shape[2:])
-        np_images, target_sizes = _to_numpy_images(flat)
+        cls_logits = outputs["pred_logits"]  # (B*num_frames, Q, K)
+        mask_logits = outputs["pred_masks"]  # (B*num_frames, Q, h, w)
+        mask_logits = F.interpolate(mask_logits, size=(H, W), mode="bilinear", align_corners=False)
 
-        encoded_inputs = self.processor(images=np_images, return_tensors="pt")
-        encoded_inputs = {k: v.to(self._model_device) for k, v in encoded_inputs.items()}
-
-        outputs = self.model(**encoded_inputs)
-        cls_logits = outputs.class_queries_logits    # (B*S, Q, K)
-        mask_logits = outputs.masks_queries_logits   # (B*S, Q, H/4, W/4)
-
-        cls_logits = cls_logits.reshape(B, S, *cls_logits.shape[1:])
-        mask_logits = mask_logits.reshape(B, S, *mask_logits.shape[1:])
-
-        semantic_maps_list = self.processor.post_process_semantic_segmentation(
-            outputs,
-            target_sizes=target_sizes,
-        )
-        semantic_maps = torch.stack(semantic_maps_list, dim=0).reshape(B, S, *semantic_maps_list[0].shape)
+        semantic_maps = self._semantic_from_logits(cls_logits, mask_logits)
+        cls_logits = cls_logits.reshape(batch, num_frames, *cls_logits.shape[1:])
+        mask_logits = mask_logits.reshape(batch, num_frames, *mask_logits.shape[1:])
+        semantic_maps = semantic_maps.reshape(batch, num_frames, H, W)
 
         return cls_logits, mask_logits, semantic_maps
+
+    def _build_feature_dict(
+        self,
+        film_pyramid: Sequence[Optional[torch.Tensor]],
+        frame_indices: Sequence[int],
+        target_hw: Tuple[int, int],
+    ) -> Tuple[Dict[str, torch.Tensor], int, int]:
+        idx_tensor = torch.as_tensor(frame_indices, dtype=torch.long, device=film_pyramid[0].device)
+        num_frames = int(idx_tensor.numel())
+        B = film_pyramid[0].shape[0]
+        features: Dict[str, torch.Tensor] = {}
+        keys = ["res2", "res3", "res4", "res5"]
+        for key, level, stride in zip(keys, film_pyramid[:4], self.scales):
+            assert level is not None  # for type-checkers
+            selected = level.index_select(1, idx_tensor)
+            selected = selected.reshape(B * num_frames, *selected.shape[2:])
+            size = (
+                max(1, target_hw[0] // stride),
+                max(1, target_hw[1] // stride),
+            )
+            resized = F.interpolate(selected, size=size, mode="bilinear", align_corners=False)
+            features[key] = resized.to(self.device, dtype=torch.float32)
+        return features, B, num_frames
+
+    def _semantic_from_logits(self, cls_logits: torch.Tensor, mask_logits: torch.Tensor) -> torch.Tensor:
+        class_probs = cls_logits.softmax(dim=-1)[..., :-1]
+        mask_probs = mask_logits.sigmoid()
+        seg_scores = torch.einsum("bqc,bqhw->bchw", class_probs, mask_probs)
+        return seg_scores.argmax(dim=1).to(torch.int64)
