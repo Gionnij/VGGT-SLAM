@@ -171,9 +171,9 @@ python -m semantic.prep.rasterize \
   ++rasterout_dir="$SCANNETPP_OUT" \
   ++image_type=dslr \
   ++undistort_dslr=true \
-  ++image_downsample_factor=4 \
-  ++subsample_factor=4 \
-  ++batch_size=4
+  ++image_downsample_factor=1 \
+  ++subsample_factor=1 \
+  ++batch_size=6
 
 # ---------- step 2: semantics 2D ----------
 
@@ -189,7 +189,7 @@ python -m semantic.prep.semantics_2d \
   ++save_dir="semantics_2d" \
   ++image_type=dslr \
   ++undistort_dslr=true \
-  ++subsample_factor=4 \
+  ++subsample_factor=1 \
   ++save_semantic_gt_2d=true \
   ++save_objid_gt_2d=true \
   ++viz_semantic_gt_2d=false \
