@@ -216,6 +216,9 @@ def export_scene(
         for start, end in chunk_indices(len(frames), window_size, chunk_overlap):
             window_paths = frames[start:end]
             imgs = load_and_preprocess_images([str(p) for p in window_paths])
+            # load_and_preprocess_images returns [S,3,H,W]; add batch dim for consistency
+            if imgs.ndim == 4:
+                imgs = imgs.unsqueeze(0)
             imgs = imgs.to(next(model.parameters()).device)
             B, S = imgs.shape[:2]
             H, W = imgs.shape[-2:]
