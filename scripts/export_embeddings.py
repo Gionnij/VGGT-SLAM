@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", required=True, help="Where to store exported tensors.")
     parser.add_argument(
+        "--image-subdir",
+        default="",
+        help="Optional subdirectory under each scene (e.g., dslr/resized_undistorted_images).",
+    )
+    parser.add_argument(
         "--window-size",
         type=int,
         default=8,
@@ -271,10 +276,14 @@ def main() -> None:
     output_root = Path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    image_subdir = args.image_subdir.strip().strip("/")
+
     if args.image_dir:
         if not args.scene_id:
             raise ValueError("--scene-id is required when using --image-dir")
-        scene_specs = [(args.scene_id, Path(args.image_dir))]
+        base_dir = Path(args.image_dir)
+        img_dir = base_dir / image_subdir if image_subdir else base_dir
+        scene_specs = [(args.scene_id, img_dir)]
     else:
         root = Path(args.data_root)
         if not root.is_dir():
@@ -288,7 +297,8 @@ def main() -> None:
                 continue
             if wanted and sub.name not in wanted:
                 continue
-            scene_specs.append((sub.name, sub))
+            img_dir = sub / image_subdir if image_subdir else sub
+            scene_specs.append((sub.name, img_dir))
         if not scene_specs:
             raise RuntimeError("No scenes found under data root with the given filters.")
 
