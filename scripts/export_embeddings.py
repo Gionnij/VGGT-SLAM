@@ -183,6 +183,15 @@ def load_model(device: torch.device) -> VGGT:
     state = torch.hub.load_state_dict_from_url(checkpoint_url, map_location="cpu")
     model.load_state_dict(state)
     model.eval()
+
+    # Ensure depth head processes full sequences (no internal chunking to 8 frames).
+    orig_depth_forward = model.depth_head.forward
+
+    def depth_forward_no_chunk(self, aggregated_tokens_list, images, patch_start_idx, frames_chunk_size=None):
+        return orig_depth_forward(aggregated_tokens_list, images, patch_start_idx, frames_chunk_size=frames_chunk_size)
+
+    model.depth_head.forward = depth_forward_no_chunk.__get__(model.depth_head, type(model.depth_head))
+
     return model
 
 
