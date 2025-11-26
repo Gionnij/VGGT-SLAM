@@ -197,14 +197,25 @@ class FusionMask2Former(nn.Module):
         return cls_logits, mask_logits
 
 
-def dense_logits_from_queries(cls_logits: torch.Tensor, mask_logits: torch.Tensor) -> torch.Tensor:
+def dense_logits_from_queries(cls_logits: torch.Tensor, mask_logits: torch.Tensor, B: int, S: int) -> torch.Tensor:
     """
-    Turn query logits into dense per-class logits: [B,S,C,H,W].
+    Turn query logits into dense per-class logits, restoring [B,S,C,H,W].
+    cls_logits: [B,S,Q,C] or [B,Q,C]
+    mask_logits: [B,S,Q,H,W] or [B,Q,H,W]
     """
-    class_probs = cls_logits.softmax(dim=-1)[..., :-1]  # drop no-object
-    mask_probs = mask_logits.sigmoid()
-    seg = torch.einsum("bqc,bqhw->bchw", class_probs, mask_probs)
-    return seg
+    # Flatten frames into batch for einsum, then reshape back
+    if cls_logits.dim() == 4:
+        cls_flat = cls_logits.reshape(B * S, *cls_logits.shape[-2:])
+        mask_flat = mask_logits.reshape(B * S, *mask_logits.shape[-3:])
+    else:
+        cls_flat = cls_logits
+        mask_flat = mask_logits
+    class_probs = cls_flat.softmax(dim=-1)[..., :-1]  # drop no-object
+    mask_probs = mask_flat.sigmoid()
+    seg_flat = torch.einsum("bqc,bqhw->bchw", class_probs, mask_probs)
+    if cls_logits.dim() == 4:
+        seg_flat = seg_flat.reshape(B, S, *seg_flat.shape[1:])
+    return seg_flat
 
 
 def collate_fn(batch: List[Dict]) -> Dict:
@@ -267,8 +278,16 @@ def main() -> None:
             optim.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.use_half and device.type == "cuda"):
                 cls_logits, mask_logits = model(dino, dpt_levels, label_shape=(H, W))
-                seg_logits = dense_logits_from_queries(cls_logits, mask_logits)  # [B, C, H', W']
+                S_frames = cls_logits.shape[1] if cls_logits.dim() == 4 else 1
+                seg_logits = dense_logits_from_queries(cls_logits, mask_logits, B=dino.shape[0], S=S_frames)  # [B, S, C, H', W'] or [B,C,H',W']
+                if seg_logits.dim() == 5:
+                    seg_logits = seg_logits.reshape(dino.shape[0] * S_frames, *seg_logits.shape[2:])
                 seg_logits = F.interpolate(seg_logits, size=(H, W), mode="bilinear", align_corners=False)
+                if seg_logits.dim() == 4 and S_frames > 1:
+                    seg_logits = seg_logits.view(dino.shape[0], S_frames, *seg_logits.shape[1:])
+                elif seg_logits.dim() == 4:
+                    seg_logits = seg_logits.unsqueeze(1)  # [B,1,C,H,W]
+                seg_logits = seg_logits.squeeze(1)
                 loss = F.cross_entropy(seg_logits, label_tensor, ignore_index=args.ignore_index)
 
             scaler.scale(loss).backward()
