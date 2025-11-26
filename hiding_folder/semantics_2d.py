@@ -220,11 +220,12 @@ def main(cfg : DictConfig) -> None:
                 if cfg.skip_existing_semantic_gt_2d and out_path.exists():
                     print(f'File exists: {out_path}, skipping')
                     continue
-                # use 255 so that it can be saved as a PNG!
-                pix_sem_ids = get_sem_ids_on_2d(pix_obj_ids, anno, semantic_classes, ignore_label=255)
+                # use a 16-bit ignore label so we can store full class ids safely
+                ignore_label = np.uint16(65535)
+                pix_sem_ids = get_sem_ids_on_2d(pix_obj_ids, anno, semantic_classes, ignore_label=int(ignore_label))
+                pix_sem_ids = np.array(pix_sem_ids, dtype=np.uint16)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                # save to png file, smaller
-                print(f'Saving 2d semantic anno to {out_path}')
+                print(f'Saving 16-bit 2d semantic anno to {out_path}')
                 cv2.imwrite(str(out_path), pix_sem_ids)
 
                 if cfg.viz_semantic_gt_2d:
