@@ -117,12 +117,10 @@ class SemanticHead(nn.Module):
         cls_logits = outputs["pred_logits"]  # (B*num_frames, Q, K)
         mask_logits = outputs["pred_masks"]  # (B*num_frames, Q, h, w) low-res mask logits
 
-        semantic_maps = self._semantic_from_logits(cls_logits, mask_logits)
         cls_logits = cls_logits.reshape(batch, num_frames, *cls_logits.shape[1:])
         mask_logits = mask_logits.reshape(batch, num_frames, *mask_logits.shape[1:])
-        semantic_maps = semantic_maps.reshape(batch, num_frames, H, W)
 
-        return cls_logits, mask_logits, semantic_maps
+        return cls_logits, mask_logits, None
 
     def _build_feature_dict(
         self,
