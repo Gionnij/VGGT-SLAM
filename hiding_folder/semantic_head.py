@@ -51,6 +51,9 @@ class SemanticHead(nn.Module):
 
         cfg = get_cfg()
         add_maskformer2_config(cfg)
+        # Allow config keys not present in older detectron2 builds (e.g., STEM_TYPE).
+        if hasattr(cfg, "set_new_allowed"):
+            cfg.set_new_allowed(True)
         cfg_path = Path(config_path).expanduser() if config_path else self._DEFAULT_CFG
         if not cfg_path.is_file():
             raise FileNotFoundError(f"Mask2Former config not found at {cfg_path}")
