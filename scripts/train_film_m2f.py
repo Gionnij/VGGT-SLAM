@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--max-chunks", type=int, default=None, help="Optional cap on chunks for quick tests.")
     p.add_argument("--num-classes", type=int, default=200, help="Number of semantic classes.")
+    p.add_argument("--ignore-index", type=int, default=65535, help="Label value to ignore in loss.")
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
     p.add_argument("--weights-path", help="Optional Mask2Former checkpoint to init from.")
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
@@ -117,14 +118,19 @@ class ChunkDataset(Dataset):
 
 
 def load_label_png(path: Path) -> torch.Tensor:
-    import torchvision.io  # deferred import to avoid dependency if unused
+    # PIL supports 16-bit PNGs; torchvision.io.read_image does not.
+    from PIL import Image
+    import numpy as np
 
     if not path.is_file():
         raise FileNotFoundError(f"Label file not found: {path}")
-    label = torchvision.io.read_image(str(path))  # [1,H,W] uint8
-    if label.ndim != 3 or label.shape[0] != 1:
-        raise ValueError(f"Expected single-channel PNG, got {tuple(label.shape)} at {path}")
-    return label.squeeze(0).long()
+    arr = np.array(Image.open(path), copy=False)
+    if arr.ndim == 3:
+        if arr.shape[2] == 1:
+            arr = arr[:, :, 0]
+        else:
+            raise ValueError(f"Expected single-channel label, got shape {arr.shape} at {path}")
+    return torch.from_numpy(arr).long()
 
 
 class FiLMFusion(nn.Module):
@@ -263,7 +269,7 @@ def main() -> None:
                 cls_logits, mask_logits = model(dino, dpt_levels, label_shape=(H, W))
                 seg_logits = dense_logits_from_queries(cls_logits, mask_logits)  # [B, C, H', W']
                 seg_logits = F.interpolate(seg_logits, size=(H, W), mode="bilinear", align_corners=False)
-                loss = F.cross_entropy(seg_logits, label_tensor, ignore_index=255)
+                loss = F.cross_entropy(seg_logits, label_tensor, ignore_index=args.ignore_index)
 
             scaler.scale(loss).backward()
             scaler.step(optim)
