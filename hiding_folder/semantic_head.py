@@ -115,8 +115,7 @@ class SemanticHead(nn.Module):
         outputs = self.head(features)
 
         cls_logits = outputs["pred_logits"]  # (B*num_frames, Q, K)
-        mask_logits = outputs["pred_masks"]  # (B*num_frames, Q, h, w)
-        mask_logits = F.interpolate(mask_logits, size=(H, W), mode="bilinear", align_corners=False)
+        mask_logits = outputs["pred_masks"]  # (B*num_frames, Q, h, w) low-res mask logits
 
         semantic_maps = self._semantic_from_logits(cls_logits, mask_logits)
         cls_logits = cls_logits.reshape(batch, num_frames, *cls_logits.shape[1:])
