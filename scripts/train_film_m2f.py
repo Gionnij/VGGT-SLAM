@@ -282,13 +282,10 @@ def main() -> None:
                 seg_logits = dense_logits_from_queries(cls_logits, mask_logits, B=dino.shape[0], S=S_frames)  # [B, S, C, H', W'] or [B,C,H',W']
                 if seg_logits.dim() == 5:
                     seg_logits = seg_logits.reshape(dino.shape[0] * S_frames, *seg_logits.shape[2:])
-                seg_logits = F.interpolate(seg_logits, size=(H, W), mode="bilinear", align_corners=False)
-                if seg_logits.dim() == 4 and S_frames > 1:
-                    seg_logits = seg_logits.view(dino.shape[0], S_frames, *seg_logits.shape[1:])
-                elif seg_logits.dim() == 4:
-                    seg_logits = seg_logits.unsqueeze(1)  # [B,1,C,H,W]
-                seg_logits = seg_logits.squeeze(1)
-                loss = F.cross_entropy(seg_logits, label_tensor, ignore_index=args.ignore_index)
+                # Compute loss at the native mask resolution to save memory; downsample labels instead of upsampling logits.
+                target_size = seg_logits.shape[-2:]
+                label_down = F.interpolate(label_tensor.unsqueeze(1).float(), size=target_size, mode="nearest").squeeze(1).long()
+                loss = F.cross_entropy(seg_logits, label_down, ignore_index=args.ignore_index)
 
             scaler.scale(loss).backward()
             scaler.step(optim)
