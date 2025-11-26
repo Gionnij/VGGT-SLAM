@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+import datetime
+import re
 
 import torch
 import torch.nn as nn
@@ -46,6 +48,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
     p.add_argument("--weights-path", help="Optional Mask2Former checkpoint to init from.")
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
+    p.add_argument("--checkpoint-dir", default="./checkpoints", help="Directory to save checkpoints.")
+    p.add_argument(
+        "--checkpoint-name",
+        default=None,
+        help="Checkpoint filename. If omitted, auto-named as film_m2f_<date>_run_<n>.pt",
+    )
     return p.parse_args()
 
 
@@ -233,6 +241,22 @@ def collate_fn(batch: List[Dict]) -> Dict:
     }
 
 
+def _auto_checkpoint_name(ckpt_dir: Path) -> str:
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    pattern = re.compile(rf"film_m2f_{today}_run_(\d+)\.pt")
+    existing = [p.name for p in ckpt_dir.glob(f"film_m2f_{today}_run_*.pt")]
+    runs = []
+    for name in existing:
+        m = pattern.match(name)
+        if m:
+            try:
+                runs.append(int(m.group(1)))
+            except ValueError:
+                continue
+    next_run = (max(runs) + 1) if runs else 1
+    return f"film_m2f_{today}_run_{next_run:02d}.pt"
+
+
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -297,7 +321,13 @@ def main() -> None:
                 print(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 running = 0.0
 
-    print("Training finished.")
+    # Save checkpoint
+    ckpt_dir = Path(args.checkpoint_dir).expanduser()
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_name = args.checkpoint_name if args.checkpoint_name else _auto_checkpoint_name(ckpt_dir)
+    ckpt_path = ckpt_dir / ckpt_name
+    torch.save(model.state_dict(), ckpt_path)
+    print(f"Training finished. Saved checkpoint to {ckpt_path}")
 
 
 if __name__ == "__main__":
