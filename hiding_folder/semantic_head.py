@@ -131,13 +131,21 @@ class SemanticHead(nn.Module):
         frame_indices: Sequence[int],
         target_hw: Tuple[int, int],
     ) -> Tuple[Dict[str, torch.Tensor], int, int]:
-        idx_tensor = torch.as_tensor(frame_indices, dtype=torch.long, device=film_pyramid[0].device)
+        # Allow inputs shaped either [B,S,C,H,W] or [B,C,H,W] (per-frame). If the latter, add the frame dim.
+        norm_pyramid: List[torch.Tensor] = []
+        for lvl in film_pyramid:
+            if lvl is None:
+                raise ValueError("FiLM pyramid contains None; cannot build feature dict.")
+            if lvl.dim() == 4:
+                lvl = lvl.unsqueeze(1)  # -> [B,1,C,H,W]
+            norm_pyramid.append(lvl)
+
+        idx_tensor = torch.as_tensor(frame_indices, dtype=torch.long, device=norm_pyramid[0].device)
         num_frames = int(idx_tensor.numel())
-        B = film_pyramid[0].shape[0]
+        B = norm_pyramid[0].shape[0]
         features: Dict[str, torch.Tensor] = {}
         keys = ["res2", "res3", "res4", "res5"]
-        for key, level, stride in zip(keys, film_pyramid[:4], self.scales):
-            assert level is not None  # for type-checkers
+        for key, level, stride in zip(keys, norm_pyramid[:4], self.scales):
             selected = level.index_select(1, idx_tensor)
             selected = selected.reshape(B * num_frames, *selected.shape[2:])
             size = (

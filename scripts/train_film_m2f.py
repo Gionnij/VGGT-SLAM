@@ -124,7 +124,7 @@ def load_label_png(path: Path) -> torch.Tensor:
 
     if not path.is_file():
         raise FileNotFoundError(f"Label file not found: {path}")
-    arr = np.array(Image.open(path), copy=False)
+    arr = np.array(Image.open(path), copy=True)  # make writable
     if arr.ndim == 3:
         if arr.shape[2] == 1:
             arr = arr[:, :, 0]
