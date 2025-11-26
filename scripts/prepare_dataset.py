@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--scenes", help="Comma-separated list of scene ids (default: all in feature-root).")
     p.add_argument("--skip-existing", action="store_true", help="Skip scenes already present in output-root.")
+    p.add_argument("--overwrite", action="store_true", help="Overwrite existing files inside a scene directory.")
     return p.parse_args()
 
 
@@ -52,12 +53,17 @@ def list_scenes(feature_root: Path, scenes_arg: Optional[str]) -> List[str]:
     return sorted([p.name for p in feature_root.iterdir() if p.is_dir()])
 
 
-def copy_many(srcs: Iterable[Path], dst_dir: Path) -> None:
+def copy_many(srcs: Iterable[Path], dst_dir: Path, overwrite: bool) -> None:
     dst_dir.mkdir(parents=True, exist_ok=True)
     for src in tqdm(list(srcs), desc=f"copy -> {dst_dir}", leave=False):
         dst = dst_dir / src.name
         if dst.exists():
-            continue
+            if not overwrite:
+                continue
+            try:
+                dst.unlink()
+            except FileNotFoundError:
+                pass
         shutil.copy2(src, dst)
 
 
@@ -92,17 +98,19 @@ def main() -> None:
         # Copy images
         if src_images.is_dir():
             imgs = sorted(p for p in src_images.iterdir() if p.is_file())
-            copy_many(imgs, dest_scene / "images")
+            copy_many(imgs, dest_scene / "images", overwrite=args.overwrite)
 
         # Copy labels
         if src_labels.is_dir():
             lbls = sorted(p for p in src_labels.iterdir() if p.is_file())
-            copy_many(lbls, dest_scene / "labels")
+            copy_many(lbls, dest_scene / "labels", overwrite=args.overwrite)
 
         # Copy chunks + meta
-        copy_many(sorted(src_chunks.glob("*.pt")), dest_scene / "chunks")
+        copy_many(sorted(src_chunks.glob("*.pt")), dest_scene / "chunks", overwrite=args.overwrite)
         dest_meta = dest_scene / "meta.json"
         dest_meta.parent.mkdir(parents=True, exist_ok=True)
+        if dest_meta.exists() and args.overwrite:
+            dest_meta.unlink()
         shutil.copy2(src_meta, dest_meta)
         print(f"[done] packed scene {scene} into {dest_scene}")
 
