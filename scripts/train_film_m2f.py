@@ -180,6 +180,8 @@ class FusionMask2Former(nn.Module):
         weights_path: Optional[str] = None,
     ):
         super().__init__()
+        if isinstance(device, str):
+            device = torch.device(device)
         self.fusion = FiLMFusion()
         self.sem_head = SemanticHead(
             device=device,
