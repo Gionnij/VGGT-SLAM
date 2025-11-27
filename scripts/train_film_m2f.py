@@ -194,6 +194,9 @@ class FusionMask2Former(nn.Module):
 
     def forward(self, dino: torch.Tensor, dpt_levels: Sequence[torch.Tensor], label_shape: Tuple[int, int]):
         # dino: [B,256,h,w], dpt_levels: list of 4 [B,C,h,w]
+        target_dtype = next(self.parameters()).dtype
+        dino = dino.to(dtype=target_dtype)
+        dpt_levels = [lvl.to(dtype=target_dtype) for lvl in dpt_levels]
         fused_levels = self.fusion(dino, dpt_levels)
         # SemanticHead expects images (for H,W) plus frame_indices and pyramid
         B = dino.shape[0]
