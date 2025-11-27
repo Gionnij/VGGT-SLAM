@@ -143,7 +143,7 @@ def main() -> None:
                 frame_paths = chk["frame_paths"]
                 dino = chk["dino_features"]  # [1,S,C,h,w]
                 dpt_list = chk["dpt_pyramid"]  # list of 4 [1,S,C,h,w]
-                H_img, W_img = chk["image_size"]
+                # Use the actual RGB image size for alignment
 
                 for idx, fpath in enumerate(frame_paths):
                     basename = Path(fpath).name
@@ -153,6 +153,10 @@ def main() -> None:
 
                     dino_t = dino[0, idx].unsqueeze(0).to(device)  # [1,C,h,w]
                     dpt_levels = [lvl[0, idx].unsqueeze(0).to(device) for lvl in dpt_list]
+
+                    # Load RGB for overlay and to set target size
+                    img = np.array(Image.open(img_path).convert("RGB"))
+                    H_img, W_img = img.shape[:2]
 
                     cls_logits, mask_logits = model(dino_t, dpt_levels, label_shape=(H_img, W_img))
                     S_frames = cls_logits.shape[1] if cls_logits.dim() == 4 else 1
@@ -170,7 +174,6 @@ def main() -> None:
                     Image.fromarray(seg_pred).save(mask_out)
 
                     # Overlay
-                    img = np.array(Image.open(img_path).convert("RGB"))
                     colored = colorize(seg_pred, palette)
                     overlay = (args.alpha * colored + (1 - args.alpha) * img).astype(np.uint8)
                     ov_out = out_ov / f"{basename}.png"
