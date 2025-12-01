@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
@@ -85,7 +86,11 @@ class SemanticHead(nn.Module):
         path = Path(weights_path).expanduser()
         if not path.is_file():
             raise FileNotFoundError(f"Mask2Former weights not found at {path}")
-        state = torch.load(path, map_location="cpu")
+        try:
+            state = torch.load(path, map_location="cpu")
+        except (RuntimeError, pickle.UnpicklingError):
+            with path.open("rb") as f:
+                state = pickle.load(f)
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
         head_state = {k.replace("sem_seg_head.", "", 1): v for k, v in state.items() if k.startswith("sem_seg_head.")}
