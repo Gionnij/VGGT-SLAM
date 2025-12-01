@@ -46,7 +46,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=200, help="Number of semantic classes.")
     p.add_argument("--ignore-index", type=int, default=65535, help="Label value to ignore in loss.")
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
-    p.add_argument("--weights-path", help="Optional Mask2Former checkpoint to init from.")
+    p.add_argument("--weights-path", help="Optional Detectron2-style Mask2Former checkpoint to init from.")
+    p.add_argument(
+        "--resume-checkpoint",
+        help="Full FusionMask2Former checkpoint (state_dict) to resume from. "
+        "If provided, overrides weights-path after model construction.",
+    )
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
     p.add_argument("--checkpoint-dir", default="./checkpoints", help="Directory to save checkpoints.")
     p.add_argument(
@@ -287,6 +292,13 @@ def main() -> None:
         config_path=args.config_path,
         weights_path=args.weights_path,
     )
+    if args.resume_checkpoint:
+        resume_path = Path(args.resume_checkpoint).expanduser()
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        print(f"[resume] loading {resume_path}")
+        state = torch.load(resume_path, map_location=device)
+        model.load_state_dict(state, strict=False)
     model.train()
 
     # Train FiLM + Mask2Former head
