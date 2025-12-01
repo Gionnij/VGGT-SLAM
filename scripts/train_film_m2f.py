@@ -294,6 +294,11 @@ def main() -> None:
     optim = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=args.use_half and device.type == "cuda")
 
+    # ############ DEBUG: count how many trainable params we actually update ############
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[dbg] trainable parameters: {num_params}")
+    # ############ END DEBUG ###########################################################
+
     for epoch in range(args.epochs):
         running = 0.0
         for step, batch in enumerate(tqdm(dl, desc=f"epoch {epoch+1}/{args.epochs}")):
@@ -314,11 +319,29 @@ def main() -> None:
                 # Compute loss at the native mask resolution to save memory; downsample labels instead of upsampling logits.
                 target_size = seg_logits.shape[-2:]
                 label_down = F.interpolate(label_tensor.unsqueeze(1).float(), size=target_size, mode="nearest").squeeze(1).long()
+                # ############ DEBUG: inspect label distribution post-downsample ############
+                valid_mask = label_down != args.ignore_index
+                valid_count = int(valid_mask.sum().item())
+                uniques = torch.unique(label_down[valid_mask])
+                print(
+                    f"[dbg] batch {step+1} valid_px={valid_count} unique_ids={uniques.cpu().tolist()[:10]}"
+                )
+                # ############ END DEBUG ####################################################
                 loss = F.cross_entropy(seg_logits, label_down, ignore_index=args.ignore_index)
 
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
+
+            # ############ DEBUG: simple grad norm probe ###################################
+            with torch.no_grad():
+                probe = model.fusion.mlps[0][0].weight
+                if probe.grad is not None:
+                    gnorm = float(probe.grad.norm().item())
+                else:
+                    gnorm = 0.0
+            print(f"[dbg] grad norm (fusion mlp0) = {gnorm:.6f}")
+            # ############ END DEBUG ######################################################
 
             running += loss.item()
             if (step + 1) % 10 == 0:
