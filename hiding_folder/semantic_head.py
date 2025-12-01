@@ -95,6 +95,7 @@ class SemanticHead(nn.Module):
                 state = pickle.load(f)
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
+        target_state = self.head.state_dict()
         head_state = {}
         for k, v in state.items():
             if not k.startswith("sem_seg_head."):
@@ -106,6 +107,11 @@ class SemanticHead(nn.Module):
                 head_state[name] = torch.from_numpy(v)
             else:
                 # skip unsupported types
+                continue
+            # Skip if shapes mismatch (e.g., different backbone channels or class counts)
+            tgt = target_state.get(name)
+            if tgt is None or head_state[name].shape != tgt.shape:
+                head_state.pop(name, None)
                 continue
         missing, unexpected = self.head.load_state_dict(head_state, strict=False)
         if missing:
