@@ -93,7 +93,18 @@ class SemanticHead(nn.Module):
                 state = pickle.load(f)
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
-        head_state = {k.replace("sem_seg_head.", "", 1): v for k, v in state.items() if k.startswith("sem_seg_head.")}
+        head_state = {}
+        for k, v in state.items():
+            if not k.startswith("sem_seg_head."):
+                continue
+            name = k.replace("sem_seg_head.", "", 1)
+            if isinstance(v, torch.Tensor):
+                head_state[name] = v
+            elif isinstance(v, np.ndarray):
+                head_state[name] = torch.from_numpy(v)
+            else:
+                # skip unsupported types
+                continue
         missing, unexpected = self.head.load_state_dict(head_state, strict=False)
         if missing:
             print(f"[SEM] Missing weights for keys: {missing}")
