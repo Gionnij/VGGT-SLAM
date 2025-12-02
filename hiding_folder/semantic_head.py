@@ -96,23 +96,39 @@ class SemanticHead(nn.Module):
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
         target_state = self.head.state_dict()
+
+        def _adapt_tensor(src: torch.Tensor, tgt: torch.Tensor) -> Optional[torch.Tensor]:
+            if src.shape == tgt.shape:
+                return src
+            if src.dim() != tgt.dim():
+                return None
+            slices = []
+            for s_dim, t_dim in zip(src.shape, tgt.shape):
+                if s_dim < t_dim:
+                    return None
+                slices.append(slice(0, t_dim))
+            return src[tuple(slices)].clone()
+
         head_state = {}
         for k, v in state.items():
             if not k.startswith("sem_seg_head."):
                 continue
             name = k.replace("sem_seg_head.", "", 1)
             if isinstance(v, torch.Tensor):
-                head_state[name] = v
+                tensor = v
             elif isinstance(v, np.ndarray):
-                head_state[name] = torch.from_numpy(v)
+                tensor = torch.from_numpy(v)
             else:
-                # skip unsupported types
                 continue
-            # Skip if shapes mismatch (e.g., different backbone channels or class counts)
             tgt = target_state.get(name)
-            if tgt is None or head_state[name].shape != tgt.shape:
-                head_state.pop(name, None)
+            if tgt is None:
                 continue
+            if tensor.shape != tgt.shape:
+                adapted = _adapt_tensor(tensor, tgt)
+                if adapted is None:
+                    continue
+                tensor = adapted
+            head_state[name] = tensor.to(dtype=tgt.dtype)
         missing, unexpected = self.head.load_state_dict(head_state, strict=False)
         if missing:
             print(f"[SEM] Missing weights for keys: {missing}")

@@ -53,6 +53,8 @@ def parse_args() -> argparse.Namespace:
         "If provided, overrides weights-path after model construction.",
     )
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
+    p.add_argument("--focal-alpha", type=float, default=0.25, help="Alpha weighting for focal loss.")
+    p.add_argument("--focal-gamma", type=float, default=2.0, help="Gamma exponent for focal loss.")
     p.add_argument("--checkpoint-dir", default="./checkpoints", help="Directory to save checkpoints.")
     p.add_argument(
         "--checkpoint-name",
@@ -251,6 +253,24 @@ def collate_fn(batch: List[Dict]) -> Dict:
     }
 
 
+def focal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    ignore_index: int,
+    alpha: float,
+    gamma: float,
+) -> torch.Tensor:
+    ce = F.cross_entropy(logits, targets, reduction="none", ignore_index=ignore_index)
+    valid = targets != ignore_index
+    if not valid.any():
+        return ce.sum() * 0.0
+    pt = torch.exp(-ce)
+    focal = ((1 - pt) ** gamma) * ce
+    if alpha is not None and alpha > 0:
+        focal = alpha * focal
+    return focal[valid].mean()
+
+
 def _auto_checkpoint_name(ckpt_dir: Path) -> str:
     today = datetime.datetime.now().strftime("%Y%m%d")
     pattern = re.compile(rf"film_m2f_{today}_run_(\d+)\.pt")
@@ -339,7 +359,13 @@ def main() -> None:
                     f"[dbg] batch {step+1} valid_px={valid_count} unique_ids={uniques.cpu().tolist()[:10]}"
                 )
                 # ############ END DEBUG ####################################################
-                loss = F.cross_entropy(seg_logits, label_down, ignore_index=args.ignore_index)
+                loss = focal_loss(
+                    seg_logits,
+                    label_down,
+                    ignore_index=args.ignore_index,
+                    alpha=args.focal_alpha,
+                    gamma=args.focal_gamma,
+                )
 
             scaler.scale(loss).backward()
             scaler.step(optim)
