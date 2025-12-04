@@ -338,6 +338,10 @@ class Solver:
         self.current_working_submap.add_all_poses(cam_to_world)
         self.current_working_submap.add_all_points(world_points, colors, conf, self.init_conf_threshold, intrinsics_cam)
         self.current_working_submap.set_conf_masks(conf) # TODO should make this work for point cloud conf as well
+        depth_maps = pred_dict.get("depth")
+        depth_confidence = pred_dict.get("depth_conf")
+        if depth_maps is not None and depth_confidence is not None:
+            self.current_working_submap.add_all_depths(depth_maps, depth_confidence)
 
         # Add in loop closures if any were detected.
         for index, loop in enumerate(detected_loops):

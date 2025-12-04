@@ -22,6 +22,8 @@ class Submap:
         self.voxelized_points = None
         self.last_non_loop_frame_index = None
         self.frame_ids = None
+        self.depth_maps = None  # (S, H, W, 1)
+        self.depth_confidence = None  # (S, H, W)
     
     def add_all_poses(self, poses):
         self.poses = poses
@@ -35,6 +37,10 @@ class Submap:
             
     def add_all_frames(self, frames):
         self.frames = frames
+
+    def add_all_depths(self, depth_maps, depth_confidence):
+        self.depth_maps = depth_maps
+        self.depth_confidence = depth_confidence
     
     def add_all_retrieval_vectors(self, retrieval_vectors):
         self.retrieval_vectors = retrieval_vectors
@@ -74,6 +80,12 @@ class Submap:
     
     def get_frame_pointcloud(self, pose_index):
         return self.pointclouds[pose_index]
+
+    def get_depth_maps(self):
+        return self.depth_maps
+
+    def get_depth_confidence(self):
+        return self.depth_confidence
 
     def set_frame_ids(self, file_paths):
         """
@@ -179,4 +191,3 @@ class Submap:
     def get_points_colors(self, stride = 1):
         colors = self.filter_data_by_confidence(self.colors, stride)
         return colors.reshape(-1, 3)
-

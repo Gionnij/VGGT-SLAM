@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import numpy as np
 import torch
 import open3d as o3d
@@ -89,12 +90,29 @@ class GraphMap:
                     f.write(" ".join(f"{v:.8f}" for v in output) + "\n")
 
     def save_framewise_pointclouds(self, file_name):
-        os.makedirs(file_name, exist_ok=True)
+        base_path = Path(file_name)
+        base_path.mkdir(parents=True, exist_ok=True)
+        depth_dir = None
         for submap in self.ordered_submaps_by_key():
             pointclouds, frame_ids, conf_masks = submap.get_points_list_in_world_frame(ignore_loop_closure_frames=True)
-            for frame_id, pointcloud, conf_masks in zip(frame_ids, pointclouds, conf_masks):
-                # save pcd as numpy array
-                np.savez(f"{file_name}/{frame_id}.npz", pointcloud=pointcloud, mask=conf_masks)
+            depth_maps = submap.get_depth_maps()
+            depth_confidence = submap.get_depth_confidence()
+            have_depth = depth_maps is not None and depth_confidence is not None
+            if have_depth and depth_dir is None:
+                depth_dir = base_path / "depth_maps"
+                depth_dir.mkdir(parents=True, exist_ok=True)
+            for idx, (frame_id, pointcloud, conf_mask) in enumerate(zip(frame_ids, pointclouds, conf_masks)):
+                np.savez(base_path / f"{frame_id}.npz", pointcloud=pointcloud, mask=conf_mask)
+                if have_depth and depth_dir is not None:
+                    depth = depth_maps[idx]
+                    if depth.shape[-1] == 1:
+                        depth = depth[..., 0]
+                    conf = depth_confidence[idx]
+                    np.savez_compressed(
+                        depth_dir / f"{frame_id}.npz",
+                        depth=depth.astype(np.float32),
+                        confidence=conf.astype(np.float32),
+                    )
                 
 
     def write_points_to_file(self, file_name):
