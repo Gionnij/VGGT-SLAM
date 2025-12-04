@@ -89,7 +89,7 @@ pub_images () {
     export FASTRTPS_DEFAULT_PROFILES_FILE='$HOME/.fastdds_unicast_runtime.xml'
 
     python3 $HOME/src/VGGT-SLAM/image_publisher.py \
-      --folder /home/s2984792/scannetpp/data/5a269ba6fe/dslr/resized_undistorted_images \
+      --folder /home/s2984792/scannetpp/data/0a7cc12c0e/dslr/resized_undistorted_images \
       --hz 2.0 \
       --image_topic /camera/image_color \
       --info_topic  /camera/camera_info \
