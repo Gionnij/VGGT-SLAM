@@ -656,5 +656,6 @@ PY
         --target_fps 2.0 --ros2_queue_size 60 \
         --local_model \"\$HOME/models/VGGT-1B/model.pt\" \
         --log_results
+        --vis_map
     "
 }
