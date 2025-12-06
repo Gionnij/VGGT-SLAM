@@ -28,10 +28,10 @@
 ################################################################################
 
 ###### token ###### enter your personalized token here
-token: <YOUR_TOKEN_HERE>
+token: MTcmaDFkzTfRZRUxpCVMIsa77vc0wVJCwezlZUdFk697QslLQy9HLTzYjuwQQwIr
 ###### download the data here ######
 # specify an absolute path
-data_root: <DOWNLOAD_LOCATION_HERE>
+data_root: /deepstore/datasets/itc/eos/scannetpp/
 
 # root url of the data
 root_url: https://scannetpp.mlsg.cit.tum.de/scannetpp/download/v2?version=v1&token=TOKEN&file=FILEPATH
