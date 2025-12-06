@@ -115,18 +115,6 @@ def urlretrieve_multi_trials(url, filename, max_trials=5):
                 print(f"ERROR when accessing {url}")
                 print(e.code, e.read())
                 raise e
-        except (urllib.error.URLError, OSError) as e:
-            # Network hiccup (e.g. temporary disconnect). Back off and retry.
-            if i < max_trials - 1:
-                wait_time = min(300, 30 * (i + 1))
-                print(
-                    f"Network error while accessing {url}: {e}. "
-                    f"Retrying in {wait_time} seconds... ({i + 1}/{max_trials})"
-                )
-                time.sleep(wait_time)
-            else:
-                print(f"Failed to download {url} after {max_trials} trials due to network errors")
-                raise e
     return False
 
 
