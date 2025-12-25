@@ -115,6 +115,18 @@ def urlretrieve_multi_trials(url, filename, max_trials=5):
                 print(f"ERROR when accessing {url}")
                 print(e.code, e.read())
                 raise e
+        except (urllib.error.URLError, OSError) as e:
+            # Network hiccup (e.g. temporary disconnect). Back off and retry.
+            if i < max_trials - 1:
+                wait_time = min(300, 30 * (i + 1))
+                print(
+                    f"Network error while accessing {url}: {e}. "
+                    f"Retrying in {wait_time} seconds... ({i + 1}/{max_trials})"
+                )
+                time.sleep(wait_time)
+            else:
+                print(f"Failed to download {url} after {max_trials} trials due to network errors")
+                raise e
     return False
 
 
@@ -129,6 +141,37 @@ def download_file(url, filename, verbose=True, make_parent=False):
     if verbose:
         print(f"{url} ==> {filename}")
     return urlretrieve_multi_trials(url, filename)
+
+
+def download_and_extract_zip(cfg, src_download_path, tgt_download_path, tgt_path, max_trials=3):
+    """Download a zip file and extract it, retrying if the archive is corrupted."""
+    for attempt in range(max_trials):
+        if not check_download_file(cfg, cfg.root_url, src_download_path, tgt_download_path, cfg.dry_run):
+            return False
+
+        if cfg.dry_run:
+            return True
+
+        try:
+            if cfg.verbose:
+                print("Unzipping:", tgt_download_path)
+            with zipfile.ZipFile(tgt_download_path, "r") as zip_ref:
+                zip_ref.extractall(tgt_download_path.parent)
+            if cfg.verbose:
+                print("Delete zip file:", tgt_download_path)
+            tgt_download_path.unlink()
+            return True
+        except zipfile.BadZipFile as e:
+            print(f"Corrupted zip detected at {tgt_download_path}.")
+            if tgt_download_path.exists():
+                tgt_download_path.unlink()
+            if attempt == max_trials - 1:
+                print("Exceeded maximum attempts to download a valid zip file.")
+                raise e
+            wait_time = 30 * (attempt + 1)
+            print(f"Retrying download in {wait_time} seconds...")
+            time.sleep(wait_time)
+    return False
 
 
 def check_download_file(cfg, url_template, remote_path, local_path, dry_run):
@@ -275,22 +318,10 @@ def main(args):
                 src_download_path = getattr(src_scene, asset).with_suffix(".zip")
                 tgt_download_path = tgt_path.with_suffix(".zip")
 
-                if not check_download_file(cfg, cfg.root_url, src_download_path, tgt_download_path, cfg.dry_run):
+                if not download_and_extract_zip(cfg, src_download_path, tgt_download_path, tgt_path):
                     missing.append(str(tgt_download_path))
-                    # Abort the downloading process
                     download_has_error = True
                     break
-
-                if not cfg.dry_run:
-                    # unzip it
-                    if cfg.verbose:
-                        print("Unzipping:", tgt_download_path)
-                    with zipfile.ZipFile(tgt_download_path, "r") as zip_ref:
-                        zip_ref.extractall(tgt_download_path.parent)
-                    # remove the zip file
-                    if cfg.verbose:
-                        print("Delete zip file:", tgt_download_path)
-                    tgt_download_path.unlink()
             else:
                 #  download single file
                 src_path = getattr(src_scene, asset)

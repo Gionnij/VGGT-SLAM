@@ -375,6 +375,13 @@ vggt_m2f_env () {
   export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 
   # VGGT-SLAM core + salad + mask2former
+  local VGGT_CORE_ROOT="${VGGT_CORE_ROOT:-$HOME/vggt}"
+  if [ -d "$VGGT_CORE_ROOT" ]; then
+    export PYTHONPATH="$VGGT_CORE_ROOT:${PYTHONPATH}"
+  else
+    echo "[vggt_m2f_env] warn: VGGT core repo not found at $VGGT_CORE_ROOT" >&2
+  fi
+
   export PYTHONPATH="$VGGT_SLAM_ROOT:$VGGT_SLAM_ROOT/salad:$VGGT_SLAM_ROOT/mask2former:${PYTHONPATH}"
 
   # Mask2Former convenience

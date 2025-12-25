@@ -217,7 +217,11 @@ def export_scene(
     meta_path = output_root / scene_id / "meta.json"
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
-    frames = sorted_images(image_dir, image_ext)
+    try:
+        frames = sorted_images(image_dir, image_ext)
+    except FileNotFoundError:
+        print(f"[warn {scene_id}] no images matching *{image_ext} under {image_dir}, skipping scene.")
+        return
     manifest: List[Dict] = []
     chunk_idx = 0
 

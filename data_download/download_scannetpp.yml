@@ -249,4 +249,3 @@ zipped_assets: [
 # if this is specified, downloads only the ScanNet++GS data
 scannetpp_gs_url: https://scannetpp.mlsg.cit.tum.de/scannetpp/download/scannetpp_gs?version=v1&token=TOKEN&file=FILEPATH
 scannetpp_gs_dir:
-
