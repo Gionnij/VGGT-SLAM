@@ -174,15 +174,44 @@ cleanup_scene_artifacts() {
   done
 }
 
+scene_has_prereqs() {
+  local scene="$1"
+  local scene_root="$DATA_ROOT/$scene"
+  local mesh_ply="$scene_root/scans/mesh_aligned_0.05.ply"
+  local cameras_txt="$scene_root/dslr/colmap/cameras.txt"
+  local anno_json="$scene_root/scans/segments_anno.json"
+
+  local missing=0
+  if [[ ! -f "$mesh_ply" ]]; then
+    echo "[warn $scene] missing mesh file: $mesh_ply"
+    missing=1
+  fi
+  if [[ ! -f "$cameras_txt" ]]; then
+    echo "[warn $scene] missing COLMAP cameras: $cameras_txt"
+    missing=1
+  fi
+  if [[ ! -f "$anno_json" ]]; then
+    echo "[warn $scene] missing semantic annotation: $anno_json"
+    missing=1
+  fi
+
+  return $missing
+}
+
 process_scene() {
   local scene="$1"
+  if ! scene_has_prereqs "$scene"; then
+    echo "[skip $scene] prerequisites missing, moving to next scene."
+    return
+  fi
+
   local tmp_list
   tmp_list="$(mktemp "$SPLITS_DIR/scene_${scene}_XXXX.txt")"
   echo "$scene" > "$tmp_list"
 
   echo
   echo "=== [$scene] Rasterization ==="
-  python -m semantic.prep.rasterize \
+  if ! python -m semantic.prep.rasterize \
     ++data_root="$DATA_ROOT" \
     ++scene_list_file="$tmp_list" \
     ++rasterout_dir="$SCANNETPP_OUT" \
@@ -190,11 +219,16 @@ process_scene() {
     ++undistort_dslr=true \
     ++image_downsample_factor=1 \
     ++subsample_factor=1 \
-    ++batch_size=6
+    ++batch_size=6; then
+    echo "[warn $scene] rasterization failed, skipping scene."
+    rm -f "$tmp_list"
+    cleanup_scene_artifacts "$scene"
+    return
+  fi
 
   echo
   echo "=== [$scene] Semantics 2D ==="
-  python -m semantic.prep.semantics_2d \
+  if ! python -m semantic.prep.semantics_2d \
     ++data_root="$DATA_ROOT" \
     ++dataset_root="$SCANNETPP_ROOT" \
     ++scene_list_file="$tmp_list" \
@@ -208,9 +242,17 @@ process_scene() {
     ++save_semantic_gt_2d=true \
     ++save_objid_gt_2d=false \
     ++viz_semantic_gt_2d=false \
+    ++dbg.viz_obj_ids=false \
+    ++viz_obj_ids_txt=false \
+    ++save_undistorted_images=false \
     ++skip_existing_semantic_gt_2d=false \
     ++semantic_classes_file="$CLASSES_TXT" \
-    ++semantic_2d_palette_path="$PALETTE_TXT"
+    ++semantic_2d_palette_path="$PALETTE_TXT"; then
+    echo "[warn $scene] semantics projection failed, skipping scene."
+    rm -f "$tmp_list"
+    cleanup_scene_artifacts "$scene"
+    return
+  fi
 
   rm -f "$tmp_list"
   cleanup_scene_artifacts "$scene"
