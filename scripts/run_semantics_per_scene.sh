@@ -205,6 +205,13 @@ process_scene() {
     return
   fi
 
+  local done_sentinel="$SCANNETPP_OUT/semantics_2d/semantics/$scene"
+  if [[ -d "$done_sentinel" && "$(find "$done_sentinel" -maxdepth 0 -empty 2>/dev/null)" == "" ]]; then
+    echo "[skip $scene] semantics already exist at $done_sentinel"
+    cleanup_scene_artifacts "$scene"
+    return
+  fi
+
   local tmp_list
   tmp_list="$(mktemp "$SPLITS_DIR/scene_${scene}_XXXX.txt")"
   echo "$scene" > "$tmp_list"
