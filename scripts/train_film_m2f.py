@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         help="Root with per-scene folders: images/, labels/, chunks/, meta.json (output of prepare_dataset.py).",
     )
     p.add_argument("--scenes", help="Comma-separated list of scene ids to include (default: all under dataset-root).")
+    p.add_argument(
+        "--labels-root",
+        help="Optional separate root containing labels/<scene_id>/*.png. "
+        "If omitted, labels are expected under <dataset-root>/<scene>/labels.",
+    )
     p.add_argument("--batch-size", type=int, default=1, help="Frames per batch (keep small for memory).")
     p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
     p.add_argument("--epochs", type=int, default=30)
@@ -108,8 +113,10 @@ def list_chunk_files(dataset_root: Path, scenes: Optional[Sequence[str]] = None)
     return chunk_files
 
 
-def label_path_for_frame(scene_dir: Path, frame_path: str) -> Path:
+def label_path_for_frame(scene_dir: Path, frame_path: str, labels_root: Optional[Path] = None) -> Path:
     fname = Path(frame_path).name + ".png"
+    if labels_root:
+        return labels_root / scene_dir.name / fname
     return scene_dir / "labels" / fname
 
 
@@ -152,11 +159,13 @@ class ChunkDataset(Dataset):
         ignore_classes: Optional[Sequence[int]] = None,
         ignore_value: Optional[int] = None,
         remap_dict: Optional[Dict[int, int]] = None,
+        labels_root: Optional[Path] = None,
     ) -> None:
         self.samples: List[Dict] = []
         self.ignore_classes: Set[int] = set(ignore_classes or [])
         self.ignore_value = ignore_value
         self.remap_dict = remap_dict or {}
+        self.labels_root = labels_root
         seen = set()
         for chk_file in chunk_files:
             chk = torch.load(chk_file, map_location="cpu")
@@ -169,7 +178,7 @@ class ChunkDataset(Dataset):
                 if fpath in seen:
                     continue  # drop overlaps, keep first occurrence
                 seen.add(fpath)
-                label_path = label_path_for_frame(scene_dir, fpath)
+                label_path = label_path_for_frame(scene_dir, fpath, labels_root=self.labels_root)
                 self.samples.append(
                     {
                         "scene_id": scene_id,
@@ -399,6 +408,7 @@ def main() -> None:
         ignore_classes=sorted(ignore_classes),
         ignore_value=args.ignore_index,
         remap_dict=remap_dict,
+        labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
     )
     dl = DataLoader(
         ds,
