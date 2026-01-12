@@ -53,6 +53,15 @@ def parse_args() -> argparse.Namespace:
         "--ignore-classes-file",
         help="Text file with one class id per line to ignore.",
     )
+    p.add_argument(
+        "--remap-classes-file",
+        help=(
+            "Optional text file with one original class id per line. "
+            "Masks are remapped to a dense id space [0..K-1] using this list; "
+            "values not in the list are set to ignore-index. "
+            "num-classes defaults to len(list) when provided."
+        ),
+    )
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
     p.add_argument("--weights-path", help="Optional Detectron2-style Mask2Former checkpoint to init from.")
     p.add_argument(
@@ -142,10 +151,12 @@ class ChunkDataset(Dataset):
         *,
         ignore_classes: Optional[Sequence[int]] = None,
         ignore_value: Optional[int] = None,
+        remap_dict: Optional[Dict[int, int]] = None,
     ) -> None:
         self.samples: List[Dict] = []
         self.ignore_classes: Set[int] = set(ignore_classes or [])
         self.ignore_value = ignore_value
+        self.remap_dict = remap_dict or {}
         seen = set()
         for chk_file in chunk_files:
             chk = torch.load(chk_file, map_location="cpu")
@@ -179,6 +190,12 @@ class ChunkDataset(Dataset):
         if self.ignore_classes and self.ignore_value is not None:
             for cls in self.ignore_classes:
                 label[label == cls] = self.ignore_value
+        if self.remap_dict:
+            # remap known ids to dense space; unknown -> ignore_value
+            remapped = torch.full_like(label, fill_value=self.ignore_value if self.ignore_value is not None else -1)
+            for orig, new in self.remap_dict.items():
+                remapped[label == orig] = new
+            label = remapped
         return {
             "scene_id": sample["scene_id"],
             "frame_path": sample["frame_path"],
@@ -361,6 +378,18 @@ def main() -> None:
     if ignore_classes:
         print(f"[info] remapping {len(ignore_classes)} classes to ignore_index={args.ignore_index}")
 
+    remap_classes = _load_list_from_file(args.remap_classes_file)
+    remap_dict: Dict[int, int] = {}
+    if remap_classes:
+        remap_classes = [int(x) for x in remap_classes]
+        remap_classes = sorted(set(remap_classes))
+        remap_dict = {orig: new for new, orig in enumerate(remap_classes)}
+        if args.num_classes == 200:  # default value implies not set explicitly
+            args.num_classes = len(remap_classes)
+            print(f"[info] remap_classes_file provided; setting num_classes={args.num_classes}")
+        else:
+            print(f"[info] remap_classes_file provided; keeping user num_classes={args.num_classes}")
+
     chunk_files = list_chunk_files(Path(args.dataset_root), scenes=scenes)
     if args.max_chunks:
         chunk_files = chunk_files[: args.max_chunks]
@@ -369,6 +398,7 @@ def main() -> None:
         chunk_files,
         ignore_classes=sorted(ignore_classes),
         ignore_value=args.ignore_index,
+        remap_dict=remap_dict,
     )
     dl = DataLoader(
         ds,
