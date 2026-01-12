@@ -176,6 +176,38 @@ def write_list(items: Iterable[int], path: Path) -> None:
             f.write(f"{item}\n")
 
 
+def load_running_state(output_dir: Path) -> Tuple[Counter, Counter, List[str], int, set]:
+    state_path = output_dir / "running_state.json"
+    if not state_path.is_file():
+        return Counter(), Counter(), [], 0, set()
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    img_ctr = Counter({int(k): int(v) for k, v in data.get("image_counter", {}).items()})
+    px_ctr = Counter({int(k): int(v) for k, v in data.get("pixel_counter", {}).items()})
+    scene_ids = data.get("scene_ids", [])
+    total_masks = int(data.get("total_masks", 0))
+    processed = set(data.get("processed_scenes", []))
+    return img_ctr, px_ctr, scene_ids, total_masks, processed
+
+
+def save_running_state(
+    output_dir: Path,
+    image_counter: Counter,
+    pixel_counter: Counter,
+    scene_ids: List[str],
+    total_masks: int,
+    processed_scenes: Iterable[str],
+) -> None:
+    state_path = output_dir / "running_state.json"
+    payload = {
+        "image_counter": {str(k): int(v) for k, v in image_counter.items()},
+        "pixel_counter": {str(k): int(v) for k, v in pixel_counter.items()},
+        "scene_ids": scene_ids,
+        "total_masks": total_masks,
+        "processed_scenes": list(processed_scenes),
+    }
+    state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def main() -> None:
     args = parse_args()
     mask_root = Path(args.mask_root).expanduser()
@@ -189,12 +221,14 @@ def main() -> None:
     if not scene_dirs:
         raise RuntimeError(f"No scene folders found under {mask_root}")
 
-    image_counter: Counter = Counter()
-    pixel_counter: Counter = Counter()
-    total_masks = 0
-    scene_ids: List[str] = []
+    image_counter, pixel_counter, scene_ids, total_masks, processed_scenes = load_running_state(output_dir)
+    if processed_scenes:
+        print(f"[resume] found partial state with {len(processed_scenes)} scenes processed, {total_masks} masks.")
 
     for idx, scene_dir in enumerate(scene_dirs, start=1):
+        if scene_dir.name in processed_scenes:
+            print(f"[{idx}/{len(scene_dirs)}] scene {scene_dir.name}: skipped (already processed)")
+            continue
         masks = list(iter_mask_files(scene_dir))
         if not masks:
             continue
@@ -211,6 +245,14 @@ def main() -> None:
             total_masks += 1
         if idx % 10 == 0:
             print(f"  processed scenes: {idx}, total masks so far: {total_masks}")
+        processed_scenes.add(scene_dir.name)
+        # persist running state and partial counts so tmux/interrupt can resume
+        rows_partial = summarize_counts(image_counter, pixel_counter)
+        save_table(rows_partial, output_dir)
+        save_running_state(output_dir, image_counter, pixel_counter, scene_ids, total_masks, processed_scenes)
+        with (output_dir / args.scenes_list).open("w", encoding="utf-8") as f:
+            for sid in scene_ids:
+                f.write(f"{sid}\n")
 
     rows = summarize_counts(image_counter, pixel_counter)
     save_table(rows, output_dir)
@@ -243,6 +285,11 @@ def main() -> None:
     with scenes_list_path.open("w", encoding="utf-8") as f:
         for sid in scene_ids:
             f.write(f"{sid}\n")
+
+    # clean up running state on successful completion
+    state_path = output_dir / "running_state.json"
+    if state_path.is_file():
+        state_path.unlink()
 
     print("=== Label analysis ===")
     for key, val in summary.items():
