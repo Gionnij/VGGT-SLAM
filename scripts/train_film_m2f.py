@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+from collections import OrderedDict
 import datetime
 import re
 
@@ -149,7 +150,8 @@ def _parse_ignore_classes(arg: Optional[str]) -> Set[int]:
 
 class ChunkDataset(Dataset):
     """
-    Streams per-frame samples from exported chunks, deduplicating overlapping frames.
+    Streams per-frame samples from exported chunks, deduplicating overlaps.
+    Uses an LRU cache of loaded chunks to avoid holding everything in memory.
     """
 
     def __init__(
@@ -160,20 +162,24 @@ class ChunkDataset(Dataset):
         ignore_value: Optional[int] = None,
         remap_dict: Optional[Dict[int, int]] = None,
         labels_root: Optional[Path] = None,
+        cache_size: int = 2,
     ) -> None:
         self.samples: List[Dict] = []
         self.ignore_classes: Set[int] = set(ignore_classes or [])
         self.ignore_value = ignore_value
         self.remap_dict = remap_dict or {}
         self.labels_root = labels_root
+        self.cache_size = max(1, cache_size)
+        self._cache: OrderedDict[Path, Dict] = OrderedDict()
+
         seen = set()
         for chk_file in chunk_files:
+            # Load once to build index, then drop tensors immediately.
             chk = torch.load(chk_file, map_location="cpu")
             scene_id = chk["scene_id"]
             scene_dir = chk_file.parent.parent  # .../<scene>/
             frame_paths = chk["frame_paths"]
-            dino = chk["dino_features"]  # [1,S,C,h,w]
-            dpt_list = chk["dpt_pyramid"]  # list of 4 [1,S,C,h,w]
+            image_size = chk["image_size"]
             for idx, fpath in enumerate(frame_paths):
                 if fpath in seen:
                     continue  # drop overlaps, keep first occurrence
@@ -184,11 +190,13 @@ class ChunkDataset(Dataset):
                         "scene_id": scene_id,
                         "frame_path": fpath,
                         "label_path": label_path,
-                        "dino": dino[0, idx],  # [C,h,w]
-                        "dpt_levels": [lvl[0, idx] for lvl in dpt_list],  # list of tensors
-                        "image_size": chk["image_size"],
+                        "chunk_path": chk_file,
+                        "frame_idx": idx,
+                        "image_size": image_size,
                     }
                 )
+            # free tensors
+            del chk
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -205,14 +213,29 @@ class ChunkDataset(Dataset):
             for orig, new in self.remap_dict.items():
                 remapped[label == orig] = new
             label = remapped
+        chk = self._get_chunk(sample["chunk_path"])
+        dino = chk["dino_features"][0, sample["frame_idx"]]
+        dpt_levels = [lvl[0, sample["frame_idx"]] for lvl in chk["dpt_pyramid"]]
         return {
             "scene_id": sample["scene_id"],
             "frame_path": sample["frame_path"],
-            "dino": sample["dino"],
-            "dpt_levels": sample["dpt_levels"],
+            "dino": dino,
+            "dpt_levels": dpt_levels,
             "label": label,
             "image_size": sample["image_size"],
         }
+
+    def _get_chunk(self, path: Path) -> Dict:
+        # Simple LRU cache
+        if path in self._cache:
+            chk = self._cache.pop(path)
+            self._cache[path] = chk
+            return chk
+        chk = torch.load(path, map_location="cpu")
+        self._cache[path] = chk
+        if len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+        return chk
 
 
 def load_label_png(path: Path) -> torch.Tensor:
@@ -409,6 +432,7 @@ def main() -> None:
         ignore_value=args.ignore_index,
         remap_dict=remap_dict,
         labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
+        cache_size=2,
     )
     dl = DataLoader(
         ds,
@@ -443,6 +467,7 @@ def main() -> None:
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[dbg] trainable parameters: {num_params}")
     # ############ END DEBUG ###########################################################
+    print(f"[info] dataset samples: {len(ds)} from {len(chunk_files)} chunks")
 
     ckpt_dir = Path(args.checkpoint_dir).expanduser()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
