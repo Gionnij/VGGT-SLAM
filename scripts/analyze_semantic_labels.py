@@ -194,11 +194,12 @@ def main() -> None:
     total_masks = 0
     scene_ids: List[str] = []
 
-    for scene_dir in scene_dirs:
+    for idx, scene_dir in enumerate(scene_dirs, start=1):
         masks = list(iter_mask_files(scene_dir))
         if not masks:
             continue
         scene_ids.append(scene_dir.name)
+        print(f"[{idx}/{len(scene_dirs)}] scene {scene_dir.name}: {len(masks)} masks")
         for mask_path in masks:
             mask = load_mask(mask_path)
             update_counters(
@@ -208,6 +209,8 @@ def main() -> None:
                 pixel_counter=pixel_counter,
             )
             total_masks += 1
+        if idx % 10 == 0:
+            print(f"  processed scenes: {idx}, total masks so far: {total_masks}")
 
     rows = summarize_counts(image_counter, pixel_counter)
     save_table(rows, output_dir)
