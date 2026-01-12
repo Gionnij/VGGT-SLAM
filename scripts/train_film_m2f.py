@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 import datetime
 import re
 
@@ -39,12 +39,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scenes", help="Comma-separated list of scene ids to include (default: all under dataset-root).")
     p.add_argument("--batch-size", type=int, default=1, help="Frames per batch (keep small for memory).")
     p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
-    p.add_argument("--epochs", type=int, default=1)
+    p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--max-chunks", type=int, default=None, help="Optional cap on chunks for quick tests.")
     p.add_argument("--num-classes", type=int, default=200, help="Number of semantic classes.")
     p.add_argument("--ignore-index", type=int, default=65535, help="Label value to ignore in loss.")
+    p.add_argument(
+        "--ignore-classes",
+        help="Comma-separated list of class ids to remap to ignore-index before training.",
+    )
+    p.add_argument(
+        "--ignore-classes-file",
+        help="Text file with one class id per line to ignore.",
+    )
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
     p.add_argument("--weights-path", help="Optional Detectron2-style Mask2Former checkpoint to init from.")
     p.add_argument(
@@ -61,15 +69,26 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Checkpoint filename. If omitted, auto-named as film_m2f_<date>_run_<n>.pt",
     )
+    p.add_argument(
+        "--save-every",
+        type=int,
+        default=5,
+        help="Save intermediate checkpoints every N epochs (0 disables intermediate saves).",
+    )
+    p.add_argument(
+        "--scenes-file",
+        help="Optional text file with scene ids (one per line) to train on. Overrides --scenes if provided.",
+    )
     return p.parse_args()
 
 
 def list_chunk_files(dataset_root: Path, scenes: Optional[Sequence[str]] = None) -> List[Path]:
     chunk_files: List[Path] = []
+    scene_filter = set(scenes) if scenes else None
     for scene_dir in sorted(dataset_root.iterdir()):
         if not scene_dir.is_dir():
             continue
-        if scenes and scene_dir.name not in scenes:
+        if scene_filter and scene_dir.name not in scene_filter:
             continue
         chunk_dir = scene_dir / "chunks"
         if not chunk_dir.is_dir():
@@ -85,13 +104,48 @@ def label_path_for_frame(scene_dir: Path, frame_path: str) -> Path:
     return scene_dir / "labels" / fname
 
 
+def _load_list_from_file(path_str: Optional[str]) -> Optional[List[str]]:
+    if not path_str:
+        return None
+    path = Path(path_str).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"List file not found: {path}")
+    out: List[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        val = line.strip()
+        if not val or val.startswith("#"):
+            continue
+        out.append(val)
+    return out or None
+
+
+def _parse_ignore_classes(arg: Optional[str]) -> Set[int]:
+    ignore: Set[int] = set()
+    if not arg:
+        return ignore
+    for item in arg.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        ignore.add(int(item))
+    return ignore
+
+
 class ChunkDataset(Dataset):
     """
     Streams per-frame samples from exported chunks, deduplicating overlapping frames.
     """
 
-    def __init__(self, chunk_files: Sequence[Path]) -> None:
+    def __init__(
+        self,
+        chunk_files: Sequence[Path],
+        *,
+        ignore_classes: Optional[Sequence[int]] = None,
+        ignore_value: Optional[int] = None,
+    ) -> None:
         self.samples: List[Dict] = []
+        self.ignore_classes: Set[int] = set(ignore_classes or [])
+        self.ignore_value = ignore_value
         seen = set()
         for chk_file in chunk_files:
             chk = torch.load(chk_file, map_location="cpu")
@@ -122,6 +176,9 @@ class ChunkDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict:
         sample = self.samples[idx]
         label = load_label_png(sample["label_path"])
+        if self.ignore_classes and self.ignore_value is not None:
+            for cls in self.ignore_classes:
+                label[label == cls] = self.ignore_value
         return {
             "scene_id": sample["scene_id"],
             "frame_path": sample["frame_path"],
@@ -291,12 +348,28 @@ def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    scenes = [s.strip() for s in args.scenes.split(",")] if args.scenes else None
+    scenes_from_file = _load_list_from_file(args.scenes_file)
+    if scenes_from_file and args.scenes:
+        print("[info] scenes-file provided; overriding --scenes.")
+    scenes_cli = [s.strip() for s in args.scenes.split(",")] if args.scenes else None
+    scenes = scenes_from_file or scenes_cli
+
+    ignore_classes = _parse_ignore_classes(args.ignore_classes)
+    ignore_from_file = _load_list_from_file(args.ignore_classes_file)
+    if ignore_from_file:
+        ignore_classes.update(int(s) for s in ignore_from_file)
+    if ignore_classes:
+        print(f"[info] remapping {len(ignore_classes)} classes to ignore_index={args.ignore_index}")
+
     chunk_files = list_chunk_files(Path(args.dataset_root), scenes=scenes)
     if args.max_chunks:
         chunk_files = chunk_files[: args.max_chunks]
 
-    ds = ChunkDataset(chunk_files)
+    ds = ChunkDataset(
+        chunk_files,
+        ignore_classes=sorted(ignore_classes),
+        ignore_value=args.ignore_index,
+    )
     dl = DataLoader(
         ds,
         batch_size=args.batch_size,
@@ -330,6 +403,16 @@ def main() -> None:
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[dbg] trainable parameters: {num_params}")
     # ############ END DEBUG ###########################################################
+
+    ckpt_dir = Path(args.checkpoint_dir).expanduser()
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    base_name = args.checkpoint_name if args.checkpoint_name else _auto_checkpoint_name(ckpt_dir)
+    base_path = ckpt_dir / base_name
+    base_stem = base_path.stem
+    suffix = base_path.suffix or ".pt"
+
+    def _epoch_ckpt_path(epoch_idx: int) -> Path:
+        return ckpt_dir / f"{base_stem}_epoch{epoch_idx:02d}{suffix}"
 
     for epoch in range(args.epochs):
         running = 0.0
@@ -387,13 +470,13 @@ def main() -> None:
                 print(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 running = 0.0
 
-    # Save checkpoint
-    ckpt_dir = Path(args.checkpoint_dir).expanduser()
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_name = args.checkpoint_name if args.checkpoint_name else _auto_checkpoint_name(ckpt_dir)
-    ckpt_path = ckpt_dir / ckpt_name
-    torch.save(model.state_dict(), ckpt_path)
-    print(f"Training finished. Saved checkpoint to {ckpt_path}")
+        if args.save_every and (epoch + 1) % args.save_every == 0:
+            ckpt_path = _epoch_ckpt_path(epoch + 1)
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"[checkpoint] saved weights at epoch {epoch+1} -> {ckpt_path}")
+
+    torch.save(model.state_dict(), base_path)
+    print(f"Training finished. Saved final checkpoint to {base_path}")
 
 
 if __name__ == "__main__":
