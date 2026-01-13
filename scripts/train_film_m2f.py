@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional separate root containing labels/<scene_id>/*.png. "
         "If omitted, labels are expected under <dataset-root>/<scene>/labels.",
     )
+    p.add_argument(
+        "--index-cache",
+        help="Optional path to a cache file (.pt) storing the precomputed sample index. "
+        "If present and up-to-date, avoids rescanning all chunk files. "
+        "Updated after each scan to include new/changed chunks.",
+    )
     p.add_argument("--batch-size", type=int, default=1, help="Frames per batch (keep small for memory).")
     p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
     p.add_argument("--epochs", type=int, default=30)
@@ -114,6 +120,100 @@ def list_chunk_files(dataset_root: Path, scenes: Optional[Sequence[str]] = None)
     return chunk_files
 
 
+def _chunk_stat(path: Path) -> Dict[str, int]:
+    st = path.stat()
+    return {"size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def build_or_load_index(
+    *,
+    chunk_files: Sequence[Path],
+    labels_root: Optional[Path],
+    cache_path: Optional[Path],
+) -> List[Dict]:
+    """
+    Build per-frame sample index. If cache_path is provided and valid, reuse it and
+    only process new/changed chunks.
+    """
+    cached: Dict = {"chunk_meta": {}, "samples": []}
+    if cache_path and cache_path.is_file():
+        try:
+            cached = torch.load(cache_path, map_location="cpu")
+            print(f"[info] loaded index cache from {cache_path}")
+        except Exception as e:
+            print(f"[warn] failed to load index cache {cache_path}: {e}")
+            cached = {"chunk_meta": {}, "samples": []}
+
+    cached_meta: Dict[str, Dict[str, int]] = cached.get("chunk_meta", {})
+    cached_samples: List[Dict] = cached.get("samples", [])
+
+    # Build map from chunk -> list of cached samples
+    samples_by_chunk: Dict[str, List[Dict]] = {}
+    for samp in cached_samples:
+        samples_by_chunk.setdefault(samp["chunk_path"], []).append(samp)
+
+    new_samples: List[Dict] = []
+    seen_frames = set()
+    labels_root = labels_root if labels_root else None
+    skipped_missing = 0
+
+    for idx, chk_path in enumerate(chunk_files, start=1):
+        chk_key = str(chk_path)
+        meta_now = _chunk_stat(chk_path)
+        meta_cached = cached_meta.get(chk_key)
+        if meta_cached == meta_now and chk_key in samples_by_chunk:
+            # reuse cached samples, respecting dedup of overlapping frames
+            for samp in samples_by_chunk[chk_key]:
+                if not Path(samp["label_path"]).is_file():
+                    skipped_missing += 1
+                    continue
+                if samp["frame_path"] in seen_frames:
+                    continue
+                seen_frames.add(samp["frame_path"])
+                new_samples.append(samp)
+            continue
+
+        # need to read chunk
+        chk = torch.load(chk_path, map_location="cpu")
+        scene_id = chk["scene_id"]
+        scene_dir = chk_path.parent.parent  # .../<scene>/
+        frame_paths = chk["frame_paths"]
+        image_size = chk["image_size"]
+        for fidx, fpath in enumerate(frame_paths):
+            if fpath in seen_frames:
+                continue
+            seen_frames.add(fpath)
+            label_path = label_path_for_frame(scene_dir, fpath, labels_root=labels_root)
+            if not label_path.is_file():
+                skipped_missing += 1
+                continue
+            new_samples.append(
+                {
+                    "scene_id": scene_id,
+                    "frame_path": fpath,
+                    "label_path": str(label_path),
+                    "chunk_path": chk_key,
+                    "frame_idx": fidx,
+                    "image_size": image_size,
+                }
+            )
+        cached_meta[chk_key] = meta_now
+        if idx % 50 == 0:
+            print(f"[info] indexed {idx}/{len(chunk_files)} chunks ({len(new_samples)} samples)")
+        del chk
+
+    if skipped_missing:
+        print(f"[warn] skipped {skipped_missing} samples due to missing labels")
+
+    if cache_path:
+        try:
+            torch.save({"chunk_meta": cached_meta, "samples": new_samples}, cache_path)
+            print(f"[info] saved index cache to {cache_path} ({len(new_samples)} samples)")
+        except Exception as e:
+            print(f"[warn] failed to save index cache {cache_path}: {e}")
+    return new_samples
+
+
 def label_path_for_frame(scene_dir: Path, frame_path: str, labels_root: Optional[Path] = None) -> Path:
     fname = Path(frame_path).name + ".png"
     if labels_root:
@@ -156,7 +256,7 @@ class ChunkDataset(Dataset):
 
     def __init__(
         self,
-        chunk_files: Sequence[Path],
+        samples: Sequence[Dict],
         *,
         ignore_classes: Optional[Sequence[int]] = None,
         ignore_value: Optional[int] = None,
@@ -164,7 +264,7 @@ class ChunkDataset(Dataset):
         labels_root: Optional[Path] = None,
         cache_size: int = 2,
     ) -> None:
-        self.samples: List[Dict] = []
+        self.samples: List[Dict] = list(samples)
         self.ignore_classes: Set[int] = set(ignore_classes or [])
         self.ignore_value = ignore_value
         self.remap_dict = remap_dict or {}
@@ -172,38 +272,12 @@ class ChunkDataset(Dataset):
         self.cache_size = max(1, cache_size)
         self._cache: OrderedDict[Path, Dict] = OrderedDict()
 
-        seen = set()
-        for chk_file in chunk_files:
-            # Load once to build index, then drop tensors immediately.
-            chk = torch.load(chk_file, map_location="cpu")
-            scene_id = chk["scene_id"]
-            scene_dir = chk_file.parent.parent  # .../<scene>/
-            frame_paths = chk["frame_paths"]
-            image_size = chk["image_size"]
-            for idx, fpath in enumerate(frame_paths):
-                if fpath in seen:
-                    continue  # drop overlaps, keep first occurrence
-                seen.add(fpath)
-                label_path = label_path_for_frame(scene_dir, fpath, labels_root=self.labels_root)
-                self.samples.append(
-                    {
-                        "scene_id": scene_id,
-                        "frame_path": fpath,
-                        "label_path": label_path,
-                        "chunk_path": chk_file,
-                        "frame_idx": idx,
-                        "image_size": image_size,
-                    }
-                )
-            # free tensors
-            del chk
-
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict:
         sample = self.samples[idx]
-        label = load_label_png(sample["label_path"])
+        label = load_label_png(Path(sample["label_path"]))
         if self.ignore_classes and self.ignore_value is not None:
             for cls in self.ignore_classes:
                 label[label == cls] = self.ignore_value
@@ -426,8 +500,14 @@ def main() -> None:
     if args.max_chunks:
         chunk_files = chunk_files[: args.max_chunks]
 
+    samples = build_or_load_index(
+        chunk_files=chunk_files,
+        labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
+        cache_path=Path(args.index_cache).expanduser() if args.index_cache else None,
+    )
+
     ds = ChunkDataset(
-        chunk_files,
+        samples,
         ignore_classes=sorted(ignore_classes),
         ignore_value=args.ignore_index,
         remap_dict=remap_dict,
