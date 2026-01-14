@@ -100,6 +100,28 @@ def parse_args() -> argparse.Namespace:
         "--scenes-file",
         help="Optional text file with scene ids (one per line) to train on. Overrides --scenes if provided.",
     )
+    p.add_argument(
+        "--chunk-cache-size",
+        type=int,
+        default=4,
+        help="How many chunks to keep in the in-memory LRU cache for faster reuse.",
+    )
+    p.add_argument(
+        "--persistent-workers",
+        action="store_true",
+        help="Enable persistent workers in DataLoader to reduce worker startup overhead.",
+    )
+    p.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=2,
+        help="Prefetch factor per worker for DataLoader (when num_workers > 0).",
+    )
+    p.add_argument(
+        "--no-debug-print",
+        action="store_true",
+        help="Disable per-batch debug prints to reduce overhead.",
+    )
     return p.parse_args()
 
 
@@ -512,7 +534,7 @@ def main() -> None:
         ignore_value=args.ignore_index,
         remap_dict=remap_dict,
         labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
-        cache_size=2,
+        cache_size=max(1, args.chunk_cache_size),
     )
     dl = DataLoader(
         ds,
@@ -521,6 +543,8 @@ def main() -> None:
         num_workers=args.num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=args.persistent_workers and args.num_workers > 0,
+        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
     )
 
     model = FusionMask2Former(
@@ -562,12 +586,12 @@ def main() -> None:
     for epoch in range(args.epochs):
         running = 0.0
         for step, batch in enumerate(tqdm(dl, desc=f"epoch {epoch+1}/{args.epochs}")):
-            dino = batch["dino"].to(device)
-            dpt_levels = [lvl.to(device) for lvl in batch["dpt_levels"]]
+            dino = batch["dino"].to(device, non_blocking=True)
+            dpt_levels = [lvl.to(device, non_blocking=True) for lvl in batch["dpt_levels"]]
             # labels list; assume all same H,W within batch
             labels = batch["labels"]
             H, W = labels[0].shape[-2:]
-            label_tensor = torch.stack(labels, dim=0).to(device)
+            label_tensor = torch.stack(labels, dim=0).to(device, non_blocking=True)
 
             optim.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.use_half and device.type == "cuda"):
@@ -579,35 +603,17 @@ def main() -> None:
                 # Compute loss at the native mask resolution to save memory; downsample labels instead of upsampling logits.
                 target_size = seg_logits.shape[-2:]
                 label_down = F.interpolate(label_tensor.unsqueeze(1).float(), size=target_size, mode="nearest").squeeze(1).long()
-                # ############ DEBUG: inspect label distribution post-downsample ############
-                valid_mask = label_down != args.ignore_index
-                valid_count = int(valid_mask.sum().item())
-                uniques = torch.unique(label_down[valid_mask])
-                print(
-                    f"[dbg] batch {step+1} valid_px={valid_count} unique_ids={uniques.cpu().tolist()[:10]}"
-                )
-                # ############ END DEBUG ####################################################
-                loss = focal_loss(
-                    seg_logits,
-                    label_down,
-                    ignore_index=args.ignore_index,
-                    alpha=args.focal_alpha,
-                    gamma=args.focal_gamma,
-                )
+            loss = focal_loss(
+                seg_logits,
+                label_down,
+                ignore_index=args.ignore_index,
+                alpha=args.focal_alpha,
+                gamma=args.focal_gamma,
+            )
 
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
-
-            # ############ DEBUG: simple grad norm probe ###################################
-            with torch.no_grad():
-                probe = model.fusion.mlps[0][0].weight
-                if probe.grad is not None:
-                    gnorm = float(probe.grad.norm().item())
-                else:
-                    gnorm = 0.0
-            print(f"[dbg] grad norm (fusion mlp0) = {gnorm:.6f}")
-            # ############ END DEBUG ######################################################
 
             running += loss.item()
             if (step + 1) % 10 == 0:
