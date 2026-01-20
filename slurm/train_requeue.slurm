@@ -17,8 +17,15 @@ if [ -f "${REPO_ROOT}/shell/bashrc_shared" ]; then
   # shellcheck disable=SC1090
   source "${REPO_ROOT}/shell/bashrc_shared"
   if type vggt_m2f_env >/dev/null 2>&1; then
-    vggt_m2f_env || echo "[warn] vggt_m2f_env failed; continuing"
+    echo "[env] activating vggt_m2f_env"
+    if ! vggt_m2f_env; then
+      echo "[warn] vggt_m2f_env failed; continuing with current PATH"
+    fi
+  else
+    echo "[warn] vggt_m2f_env not found after sourcing bashrc_shared"
   fi
+else
+  echo "[warn] bashrc_shared not found at ${REPO_ROOT}/shell/bashrc_shared"
 fi
 
 RUN_DIR="${RUN_DIR:-"$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"}"
@@ -44,7 +51,17 @@ if [ -n "$LABELS_ROOT" ]; then
   echo "[env] LABELS_ROOT=$LABELS_ROOT"
 fi
 
-TRAIN_PYTHON="${TRAIN_PYTHON:-python3}"
+if [ -z "${TRAIN_PYTHON:-}" ]; then
+  if [ -x "${HOME}/.venvs/vggt-m2f/bin/python" ]; then
+    TRAIN_PYTHON="${HOME}/.venvs/vggt-m2f/bin/python"
+    echo "[env] using TRAIN_PYTHON=${TRAIN_PYTHON} (venv)"
+  else
+    TRAIN_PYTHON="python3"
+    echo "[env] using TRAIN_PYTHON=${TRAIN_PYTHON} (fallback)"
+  fi
+else
+  echo "[env] using TRAIN_PYTHON=${TRAIN_PYTHON} (provided)"
+fi
 
 CMD=("$TRAIN_PYTHON" -u scripts/train_film_m2f_optimized.py \
   --dataset-root "$DATASET_ROOT" \
