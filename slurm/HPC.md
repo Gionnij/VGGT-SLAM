@@ -34,4 +34,7 @@ python -u scripts/train_film_m2f_optimized.py \
   --ckpt-dir "$RUN_DIR/checkpoints" \
   --resume auto \
   --batch-size 2 --epochs 60
-```
+  ```
+
+## Environment
+- The Slurm script sources `shell/bashrc_shared` and runs `vggt_m2f_env` automatically if available, so you get the same CUDA/venv setup as your interactive sessions. If you need a different env, adjust that function or source your own before calling `sbatch`.

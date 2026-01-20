@@ -9,6 +9,18 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+# Load shared env + venv (vggt_m2f_env) if available.
+if [ -f "${REPO_ROOT}/shell/bashrc_shared" ]; then
+  # shellcheck disable=SC1090
+  source "${REPO_ROOT}/shell/bashrc_shared"
+  if type vggt_m2f_env >/dev/null 2>&1; then
+    vggt_m2f_env || echo "[warn] vggt_m2f_env failed; continuing"
+  fi
+fi
+
 RUN_DIR="${RUN_DIR:-"$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"}"
 DATASET_ROOT="${DATASET_ROOT:?Set DATASET_ROOT to your packed dataset root (with chunks/labels).}"
 LABELS_ROOT="${LABELS_ROOT:-}"
