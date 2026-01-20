@@ -32,6 +32,9 @@ RUN_DIR="${RUN_DIR:-"$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%
 DATASET_ROOT="${DATASET_ROOT:?Set DATASET_ROOT to your packed dataset root (with chunks/labels).}"
 LABELS_ROOT="${LABELS_ROOT:-}"
 EXTRA_ARGS=("$@")
+if [ "${#EXTRA_ARGS[@]}" -gt 0 ] && [ "${EXTRA_ARGS[0]}" = "--" ]; then
+  EXTRA_ARGS=("${EXTRA_ARGS[@]:1}")
+fi
 
 mkdir -p "$RUN_DIR" "$RUN_DIR/logs" "$RUN_DIR/checkpoints"
 
