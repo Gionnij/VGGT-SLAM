@@ -44,7 +44,9 @@ if [ -n "$LABELS_ROOT" ]; then
   echo "[env] LABELS_ROOT=$LABELS_ROOT"
 fi
 
-CMD=(python -u scripts/train_film_m2f_optimized.py \
+TRAIN_PYTHON="${TRAIN_PYTHON:-python3}"
+
+CMD=("$TRAIN_PYTHON" -u scripts/train_film_m2f_optimized.py \
   --dataset-root "$DATASET_ROOT" \
   --run-dir "$RUN_DIR" \
   --ckpt-dir "$RUN_DIR/checkpoints" \
