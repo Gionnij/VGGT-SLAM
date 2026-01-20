@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from collections import OrderedDict
 import datetime
-import re
+import time
 
 import torch
 import torch.nn as nn
@@ -77,25 +77,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
     p.add_argument("--weights-path", help="Optional Detectron2-style Mask2Former checkpoint to init from.")
     p.add_argument(
-        "--resume-checkpoint",
-        help="Full FusionMask2Former checkpoint (state_dict) to resume from. "
-        "If provided, overrides weights-path after model construction.",
+        "--resume",
+        default="auto",
+        help="Resume from 'auto' (latest in ckpt-dir), 'none', or a checkpoint path.",
     )
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
     p.add_argument("--focal-alpha", type=float, default=0.25, help="Alpha weighting for focal loss.")
     p.add_argument("--focal-gamma", type=float, default=2.0, help="Gamma exponent for focal loss.")
-    p.add_argument("--checkpoint-dir", default="./checkpoints", help="Directory to save checkpoints.")
-    p.add_argument(
-        "--checkpoint-name",
-        default=None,
-        help="Checkpoint filename. If omitted, auto-named as film_m2f_<date>_run_<n>.pt",
-    )
-    p.add_argument(
-        "--save-every",
-        type=int,
-        default=5,
-        help="Save intermediate checkpoints every N epochs (0 disables intermediate saves).",
-    )
     p.add_argument(
         "--scenes-file",
         help="Optional text file with scene ids (one per line) to train on. Overrides --scenes if provided.",
@@ -170,6 +158,21 @@ def parse_args() -> argparse.Namespace:
         "--no-debug-print",
         action="store_true",
         help="Disable per-batch debug prints to reduce overhead.",
+    )
+    p.add_argument(
+        "--run-dir",
+        default="./runs/film_m2f",
+        help="Run directory for checkpoints/logs (checkpoints are written to <run-dir>/checkpoints).",
+    )
+    p.add_argument(
+        "--ckpt-dir",
+        help="Optional override for checkpoint directory (defaults to <run-dir>/checkpoints).",
+    )
+    p.add_argument(
+        "--save-every-minutes",
+        type=int,
+        default=10,
+        help="Minutes between checkpoint saves (0 disables interval-based saves).",
     )
     return p.parse_args()
 
@@ -673,20 +676,37 @@ def focal_loss(
     return focal[valid].mean()
 
 
-def _auto_checkpoint_name(ckpt_dir: Path) -> str:
-    today = datetime.datetime.now().strftime("%Y%m%d")
-    pattern = re.compile(rf"film_m2f_{today}_run_(\d+)\.pt")
-    existing = [p.name for p in ckpt_dir.glob(f"film_m2f_{today}_run_*.pt")]
-    runs = []
-    for name in existing:
-        m = pattern.match(name)
-        if m:
-            try:
-                runs.append(int(m.group(1)))
-            except ValueError:
-                continue
-    next_run = (max(runs) + 1) if runs else 1
-    return f"film_m2f_{today}_run_{next_run:02d}.pt"
+def _is_rank0() -> bool:
+    if not torch.distributed.is_available():
+        return True
+    if not torch.distributed.is_initialized():
+        return True
+    try:
+        return torch.distributed.get_rank() == 0
+    except Exception:
+        return True
+
+
+def _latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
+    if not ckpt_dir.is_dir():
+        return None
+    candidates = [p for p in ckpt_dir.glob("*.pt") if not p.name.endswith(".tmp")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _checkpoint_path(ckpt_dir: Path, epoch: int, global_step: int) -> Path:
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return ckpt_dir / f"film_m2f_epoch{epoch:04d}_step{global_step:08d}_{ts}.pt"
+
+
+def _atomic_save_checkpoint(path: Path, payload: Dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(path)
+    return path
 
 
 def main() -> None:
@@ -782,13 +802,6 @@ def main() -> None:
         config_path=args.config_path,
         weights_path=args.weights_path,
     )
-    if args.resume_checkpoint:
-        resume_path = Path(args.resume_checkpoint).expanduser()
-        if not resume_path.is_file():
-            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
-        print(f"[resume] loading {resume_path}")
-        state = torch.load(resume_path, map_location=device)
-        model.load_state_dict(state, strict=False)
     model.train()
 
     # Train FiLM + Mask2Former head
@@ -802,22 +815,87 @@ def main() -> None:
     # ############ END DEBUG ###########################################################
     print(f"[info] dataset samples: {len(ds)} from {len(chunk_files)} chunks")
 
-    ckpt_dir = Path(args.checkpoint_dir).expanduser()
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    base_name = args.checkpoint_name if args.checkpoint_name else _auto_checkpoint_name(ckpt_dir)
-    base_path = ckpt_dir / base_name
-    base_stem = base_path.stem
-    suffix = base_path.suffix or ".pt"
+    run_dir = Path(args.run_dir).expanduser()
+    ckpt_dir = Path(args.ckpt_dir).expanduser() if args.ckpt_dir else run_dir / "checkpoints"
+    log_dir = run_dir / "logs"
+    request_save_file = run_dir / "REQUEST_SAVE"
+    for d in (run_dir, ckpt_dir, log_dir):
+        d.mkdir(parents=True, exist_ok=True)
 
-    def _epoch_ckpt_path(epoch_idx: int) -> Path:
-        return ckpt_dir / f"{base_stem}_epoch{epoch_idx:02d}{suffix}"
+    scheduler = None  # placeholder for future schedulers; still checkpointed for completeness
 
-    for epoch in range(args.epochs):
+    global_step = 0
+    start_epoch = 0
+    start_step_in_epoch = 0
+
+    resume_arg = (args.resume or "none").strip().lower()
+    resume_path: Optional[Path] = None
+    if resume_arg == "auto":
+        resume_path = _latest_checkpoint(ckpt_dir)
+        if resume_path:
+            print(f"[resume] auto-selected latest checkpoint: {resume_path}")
+    elif resume_arg not in ("", "none"):
+        resume_path = Path(args.resume).expanduser()
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+    if resume_path:
+        state = torch.load(resume_path, map_location=device)
+        model_state = state.get("model_state") or state
+        model.load_state_dict(model_state, strict=False)
+        if "optimizer_state" in state:
+            optim.load_state_dict(state["optimizer_state"])
+        if scheduler and state.get("scheduler_state"):
+            scheduler.load_state_dict(state["scheduler_state"])
+        if "scaler_state" in state:
+            scaler.load_state_dict(state["scaler_state"])
+        start_epoch = int(state.get("epoch", 0))
+        start_step_in_epoch = int(state.get("step_in_epoch", -1)) + 1
+        if state.get("save_reason") == "epoch_end":
+            start_epoch += 1
+            start_step_in_epoch = 0
+        start_step_in_epoch = max(0, start_step_in_epoch)
+        global_step = int(state.get("global_step", 0))
+        print(
+            f"[resume] epoch={start_epoch+1} step_in_epoch={start_step_in_epoch} global_step={global_step}"
+        )
+    if start_epoch >= args.epochs:
+        print(f"[info] start_epoch {start_epoch} >= total epochs {args.epochs}; nothing to train.")
+        return
+
+    last_save_time = time.time()
+
+    def save_checkpoint(epoch_idx: int, step_in_epoch: int, reason: str) -> Optional[Path]:
+        if not _is_rank0():
+            return None
+        ckpt_path = _checkpoint_path(ckpt_dir, epoch_idx + 1, global_step)
+        payload = {
+            "model_state": model.state_dict(),
+            "optimizer_state": optim.state_dict(),
+            "scheduler_state": scheduler.state_dict() if scheduler else None,
+            "scaler_state": scaler.state_dict() if scaler is not None else None,
+            "epoch": epoch_idx,
+            "step_in_epoch": step_in_epoch,
+            "global_step": global_step,
+            "args": vars(args),
+            "save_reason": reason,
+        }
+        out_path = _atomic_save_checkpoint(ckpt_path, payload)
+        print(f"[checkpoint] saved ({reason}) -> {out_path}")
+        return out_path
+
+    for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
             sampler.set_epoch(epoch)
+        if epoch > start_epoch:
+            start_step_in_epoch = 0
+        step_in_epoch = -1
         running = 0.0
         for step, batch in enumerate(tqdm(dl, desc=f"epoch {epoch+1}/{args.epochs}")):
+            if step < start_step_in_epoch:
+                # Skip steps already completed before checkpoint.
+                continue
             dino = batch["dino"].to(device, non_blocking=True)
             dpt_levels = [lvl.to(device, non_blocking=True) for lvl in batch["dpt_levels"]]
             # labels list; assume all same H,W within batch
@@ -848,18 +926,31 @@ def main() -> None:
             scaler.update()
 
             running += loss.item()
+            global_step += 1
+            step_in_epoch = step
             if (step + 1) % 10 == 0:
                 avg = running / 10
                 print(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 running = 0.0
 
-        if args.save_every and (epoch + 1) % args.save_every == 0:
-            ckpt_path = _epoch_ckpt_path(epoch + 1)
-            torch.save(model.state_dict(), ckpt_path)
-            print(f"[checkpoint] saved weights at epoch {epoch+1} -> {ckpt_path}")
+            if args.save_every_minutes > 0:
+                elapsed = time.time() - last_save_time
+                if elapsed >= args.save_every_minutes * 60:
+                    save_checkpoint(epoch, step_in_epoch, reason="interval")
+                    last_save_time = time.time()
 
-    torch.save(model.state_dict(), base_path)
-    print(f"Training finished. Saved final checkpoint to {base_path}")
+            if request_save_file.is_file():
+                save_checkpoint(epoch, step_in_epoch, reason="REQUEST_SAVE")
+                try:
+                    request_save_file.unlink()
+                except FileNotFoundError:
+                    pass
+
+        # End-of-epoch checkpoint
+        save_checkpoint(epoch, step_in_epoch, reason="epoch_end")
+        last_save_time = time.time()
+
+    print("Training finished.")
 
 
 if __name__ == "__main__":
