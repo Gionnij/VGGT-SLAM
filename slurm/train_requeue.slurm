@@ -66,6 +66,19 @@ else
   echo "[env] using TRAIN_PYTHON=${TRAIN_PYTHON} (provided)"
 fi
 
+echo "[envcheck] verifying detectron2/mask2former imports with ${TRAIN_PYTHON}"
+"${TRAIN_PYTHON}" - <<'PY'
+import importlib, sys
+mods = ["detectron2", "mask2former"]
+for m in mods:
+    try:
+        importlib.import_module(m)
+        print(f"[envcheck] {m} import OK")
+    except Exception as e:
+        print(f"[envcheck] {m} import FAILED: {e}")
+        sys.exit(1)
+PY
+
 CMD=("$TRAIN_PYTHON" -u scripts/train_film_m2f_optimized.py \
   --dataset-root "$DATASET_ROOT" \
   --run-dir "$RUN_DIR" \
