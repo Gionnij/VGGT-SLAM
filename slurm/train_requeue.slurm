@@ -29,8 +29,8 @@ else
 fi
 
 # Ensure local repo paths are ahead on PYTHONPATH (covers mask2former package layout).
-# Include both the submodule root and the package dir to avoid namespace shadowing from site-packages.
-export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/salad:${REPO_ROOT}/mask2former:${REPO_ROOT}/mask2former/mask2former:${PYTHONPATH:-}"
+# Put the mask2former package dir first to avoid namespace shadowing by the outer folder.
+export PYTHONPATH="${REPO_ROOT}/mask2former/mask2former:${REPO_ROOT}:${REPO_ROOT}/salad:${PYTHONPATH:-}"
 export PYTHONNOUSERSITE=1
 
 RUN_DIR="${RUN_DIR:-"$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"}"
