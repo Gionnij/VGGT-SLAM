@@ -10,12 +10,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+_IMPORT_ERR = None
 try:
     from detectron2.config import get_cfg
     from detectron2.layers import ShapeSpec
     from detectron2.modeling import build_sem_seg_head
     from mask2former import add_maskformer2_config
-except Exception:  # pragma: no cover - optional dependency
+except Exception as e:  # pragma: no cover - optional dependency
+    _IMPORT_ERR = e
     get_cfg = None  # type: ignore[assignment]
     ShapeSpec = None  # type: ignore[assignment]
     build_sem_seg_head = None  # type: ignore[assignment]
@@ -49,7 +51,8 @@ class SemanticHead(nn.Module):
         if get_cfg is None or build_sem_seg_head is None or add_maskformer2_config is None or ShapeSpec is None:
             raise ImportError(
                 "detectron2/mask2former dependencies are missing. "
-                "Ensure the mask2former submodule and detectron2 are on PYTHONPATH."
+                "Ensure the mask2former submodule and detectron2 are on PYTHONPATH. "
+                f"Underlying import error: {_IMPORT_ERR}"
             )
 
         cfg = get_cfg()
