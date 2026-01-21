@@ -10,7 +10,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+# Prefer the submit dir to avoid /tmp/slurmd paths when Slurm copies the script.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+  REPO_ROOT="$(cd -- "${SLURM_SUBMIT_DIR}" && pwd)"
+else
+  REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+fi
 
 # Load shared env + venv (vggt_m2f_env) if available.
 if [ -f "${REPO_ROOT}/shell/bashrc_shared" ]; then
@@ -32,6 +37,8 @@ fi
 # Use the package root so mask2former.config resolves correctly.
 export PYTHONPATH="${REPO_ROOT}/mask2former:${REPO_ROOT}:${REPO_ROOT}/salad:${PYTHONPATH:-}"
 export PYTHONNOUSERSITE=1
+# Skip dataset registration to avoid noisy warnings when importing mask2former.
+export MASK2FORMER_SKIP_DATA=1
 
 RUN_DIR="${RUN_DIR:-"$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"}"
 DATASET_ROOT="${DATASET_ROOT:?Set DATASET_ROOT to your packed dataset root (with chunks/labels).}"
@@ -85,22 +92,19 @@ for m in mods:
     except Exception as e:
         print(f"[envcheck] {m} import FAILED: {e}")
         sys.exit(1)
-try:
-    from mask2former import add_maskformer2_config as cfg_fn
-    print(f"[envcheck] mask2former.add_maskformer2_config OK -> {cfg_fn}")
-except Exception as e:
-    print(f"[envcheck] mask2former.add_maskformer2_config FAILED: {e}")
+cfg_fn = None
+for mod_name in ("mask2former", "mask2former.config", "mask2former.mask2former.config"):
     try:
-        from mask2former.config import add_maskformer2_config as cfg_fn
-        print(f"[envcheck] mask2former.config.add_maskformer2_config OK -> {cfg_fn}")
-    except Exception as e2:
-        print(f"[envcheck] mask2former.config.add_maskformer2_config FAILED: {e2}")
-        try:
-            from mask2former.mask2former.config import add_maskformer2_config as cfg_fn
-            print(f"[envcheck] mask2former.mask2former.config.add_maskformer2_config OK -> {cfg_fn}")
-        except Exception as e3:
-            print(f"[envcheck] mask2former.mask2former.config.add_maskformer2_config FAILED: {e3}")
-            sys.exit(1)
+        mod = importlib.import_module(mod_name)
+        cfg_fn = getattr(mod, "add_maskformer2_config", None)
+        if cfg_fn is not None:
+            print(f"[envcheck] {mod_name}.add_maskformer2_config OK -> {cfg_fn}")
+            break
+    except Exception:
+        continue
+if cfg_fn is None:
+    print("[envcheck] add_maskformer2_config FAILED: not found in mask2former modules")
+    sys.exit(1)
 print("[envcheck] sys.path:")
 for p in sys.path:
     print(" ", p)

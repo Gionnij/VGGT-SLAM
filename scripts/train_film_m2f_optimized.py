@@ -397,6 +397,8 @@ class ChunkDataset(Dataset):
         # Optional cache of loaded label chunks (per worker process).
         self.label_chunk_cache_size = max(1, int(label_chunk_cache_size))
         self._label_chunk_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
+        # Track label chunk files that failed to load to avoid repeated errors.
+        self._bad_label_chunks: Set[Path] = set()
 
         # Fast label remap via LUT (vectorized). This avoids Python loops per sample.
         # We keep a reasonably sized LUT for 16-bit label PNGs.
@@ -421,10 +423,16 @@ class ChunkDataset(Dataset):
         label_chunk_path = sample.get("label_chunk_path")
         label: Optional[torch.Tensor] = None
         if self.use_label_chunks and label_chunk_path:
-            try:
-                label = self._get_label_from_chunk(Path(label_chunk_path), sample["frame_idx"])
-            except (FileNotFoundError, KeyError, IndexError, ValueError):
-                label = None
+            lc_path = Path(label_chunk_path)
+            if lc_path not in self._bad_label_chunks:
+                try:
+                    label = self._get_label_from_chunk(lc_path, sample["frame_idx"])
+                except (FileNotFoundError, KeyError, IndexError, ValueError, RuntimeError, OSError, EOFError) as exc:
+                    # Corrupted/incomplete chunk -> fall back to PNGs for this chunk.
+                    if lc_path not in self._bad_label_chunks:
+                        print(f"[warn] failed to load label chunk {lc_path}: {exc}; falling back to PNG labels")
+                        self._bad_label_chunks.add(lc_path)
+                    label = None
         if label is None:
             label_path = Path(sample["label_path"])
             label = self._get_label(label_path)
