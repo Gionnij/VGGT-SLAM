@@ -18,8 +18,11 @@ try:
     try:
         from mask2former import add_maskformer2_config  # type: ignore[attr-defined]
     except Exception:
-        # Some installs expose it under mask2former.config
-        from mask2former.config import add_maskformer2_config  # type: ignore[assignment]
+        # Some installs expose it under mask2former.config, or as a nested package.
+        try:
+            from mask2former.config import add_maskformer2_config  # type: ignore[assignment]
+        except Exception:
+            from mask2former.mask2former.config import add_maskformer2_config  # type: ignore[assignment]
 except Exception as e:  # pragma: no cover - optional dependency
     _IMPORT_ERR = e
     get_cfg = None  # type: ignore[assignment]

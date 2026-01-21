@@ -95,7 +95,12 @@ except Exception as e:
         print(f"[envcheck] mask2former.config.add_maskformer2_config OK -> {cfg_fn}")
     except Exception as e2:
         print(f"[envcheck] mask2former.config.add_maskformer2_config FAILED: {e2}")
-        sys.exit(1)
+        try:
+            from mask2former.mask2former.config import add_maskformer2_config as cfg_fn
+            print(f"[envcheck] mask2former.mask2former.config.add_maskformer2_config OK -> {cfg_fn}")
+        except Exception as e3:
+            print(f"[envcheck] mask2former.mask2former.config.add_maskformer2_config FAILED: {e3}")
+            sys.exit(1)
 print("[envcheck] sys.path:")
 for p in sys.path:
     print(" ", p)
