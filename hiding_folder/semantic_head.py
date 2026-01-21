@@ -53,10 +53,16 @@ class SemanticHead(nn.Module):
     ) -> None:
         super().__init__()
         if get_cfg is None or build_sem_seg_head is None or add_maskformer2_config is None or ShapeSpec is None:
+            # Help debug which module was actually imported.
+            try:
+                import mask2former as _m2f  # type: ignore
+                _m2f_loc = getattr(_m2f, "__file__", None) or getattr(getattr(_m2f, "__path__", []), 0, None)
+            except Exception:
+                _m2f_loc = None
             raise ImportError(
                 "detectron2/mask2former dependencies are missing. "
                 "Ensure the mask2former submodule and detectron2 are on PYTHONPATH. "
-                f"Underlying import error: {_IMPORT_ERR}"
+                f"Mask2Former module location: {_m2f_loc}; underlying import error: {_IMPORT_ERR}"
             )
 
         cfg = get_cfg()

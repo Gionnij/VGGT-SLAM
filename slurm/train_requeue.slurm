@@ -72,11 +72,28 @@ import importlib, sys
 mods = ["detectron2", "mask2former"]
 for m in mods:
     try:
-        importlib.import_module(m)
-        print(f"[envcheck] {m} import OK")
+        mod = importlib.import_module(m)
+        loc = getattr(mod, "__file__", None)
+        if loc is None and hasattr(mod, "__path__"):
+            loc = list(mod.__path__)[0]
+        print(f"[envcheck] {m} import OK from {loc}")
     except Exception as e:
         print(f"[envcheck] {m} import FAILED: {e}")
         sys.exit(1)
+try:
+    from mask2former import add_maskformer2_config as cfg_fn
+    print(f"[envcheck] mask2former.add_maskformer2_config OK -> {cfg_fn}")
+except Exception as e:
+    print(f"[envcheck] mask2former.add_maskformer2_config FAILED: {e}")
+    try:
+        from mask2former.config import add_maskformer2_config as cfg_fn
+        print(f"[envcheck] mask2former.config.add_maskformer2_config OK -> {cfg_fn}")
+    except Exception as e2:
+        print(f"[envcheck] mask2former.config.add_maskformer2_config FAILED: {e2}")
+        sys.exit(1)
+print("[envcheck] sys.path:")
+for p in sys.path:
+    print(" ", p)
 PY
 
 CMD=("$TRAIN_PYTHON" -u scripts/train_film_m2f_optimized.py \
