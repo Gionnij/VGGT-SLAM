@@ -15,7 +15,11 @@ try:
     from detectron2.config import get_cfg
     from detectron2.layers import ShapeSpec
     from detectron2.modeling import build_sem_seg_head
-    from mask2former import add_maskformer2_config
+    try:
+        from mask2former import add_maskformer2_config  # type: ignore[attr-defined]
+    except Exception:
+        # Some installs expose it under mask2former.config
+        from mask2former.config import add_maskformer2_config  # type: ignore[assignment]
 except Exception as e:  # pragma: no cover - optional dependency
     _IMPORT_ERR = e
     get_cfg = None  # type: ignore[assignment]
