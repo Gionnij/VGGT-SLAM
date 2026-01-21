@@ -28,6 +28,9 @@ else
   echo "[warn] bashrc_shared not found at ${REPO_ROOT}/shell/bashrc_shared"
 fi
 
+# Ensure local repo paths are ahead on PYTHONPATH (covers mask2former package layout).
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/salad:${REPO_ROOT}/mask2former:${PYTHONPATH:-}"
+
 RUN_DIR="${RUN_DIR:-"$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"}"
 DATASET_ROOT="${DATASET_ROOT:?Set DATASET_ROOT to your packed dataset root (with chunks/labels).}"
 LABELS_ROOT="${LABELS_ROOT:-}"
