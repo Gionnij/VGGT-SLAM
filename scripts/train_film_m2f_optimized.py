@@ -20,6 +20,9 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from collections import OrderedDict
 import datetime
 import time
+import itertools
+import os
+import statistics
 
 import torch
 import torch.nn as nn
@@ -50,7 +53,7 @@ def parse_args() -> argparse.Namespace:
         "Updated after each scan to include new/changed chunks.",
     )
     p.add_argument("--batch-size", type=int, default=1, help="Frames per batch (keep small for memory).")
-    p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
+    p.add_argument("--num-workers", type=int, default=2, help="DataLoader workers.")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
@@ -155,6 +158,18 @@ def parse_args() -> argparse.Namespace:
         help="Prefetch factor per worker for DataLoader (when num_workers > 0).",
     )
     p.add_argument(
+        "--diagnose-dataloader",
+        type=int,
+        default=0,
+        help="Log fetch/step timings for the first N training iterations (0 disables).",
+    )
+    p.add_argument(
+        "--check-chunk-shuffle",
+        type=int,
+        default=0,
+        help="Iterate M batches and report chunk locality without training (0 disables).",
+    )
+    p.add_argument(
         "--no-debug-print",
         action="store_true",
         help="Disable per-batch debug prints to reduce overhead.",
@@ -175,6 +190,79 @@ def parse_args() -> argparse.Namespace:
         help="Minutes between checkpoint saves (0 disables interval-based saves).",
     )
     return p.parse_args()
+
+
+def _get_nproc() -> Optional[int]:
+    try:
+        return int(os.sysconf("SC_NPROCESSORS_ONLN"))
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def _read_env_int(name: str) -> Optional[int]:
+    val = os.getenv(name)
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        return None
+
+
+def _log_startup_info(
+    args: argparse.Namespace,
+    *,
+    pin_memory: bool,
+    prefetch_factor: Optional[int],
+    persistent_workers: bool,
+) -> None:
+    cpu_count = os.cpu_count()
+    nproc = _get_nproc()
+    nproc_str = str(nproc) if nproc is not None else "n/a"
+    print(f"[info] cpu_count={cpu_count} nproc={nproc_str}")
+    slurm_cpus = os.getenv("SLURM_CPUS_PER_TASK") or "unset"
+    slurm_job_cpus = os.getenv("SLURM_JOB_CPUS_PER_NODE") or "unset"
+    omp_threads = os.getenv("OMP_NUM_THREADS") or "unset"
+    print(
+        f"[info] env SLURM_CPUS_PER_TASK={slurm_cpus} "
+        f"SLURM_JOB_CPUS_PER_NODE={slurm_job_cpus} "
+        f"OMP_NUM_THREADS={omp_threads}"
+    )
+    print(
+        f"[info] dataloader num_workers={args.num_workers} "
+        f"prefetch_factor={prefetch_factor} "
+        f"persistent_workers={persistent_workers} "
+        f"pin_memory={pin_memory}"
+    )
+    slurm_cpus_int = _read_env_int("SLURM_CPUS_PER_TASK")
+    if slurm_cpus_int is not None and slurm_cpus_int < args.num_workers:
+        print(
+            f"[warn] SLURM_CPUS_PER_TASK={slurm_cpus_int} < num_workers={args.num_workers}; "
+            "worker oversubscription likely."
+        )
+
+
+def _short_chunk_id(chunk_path: str, dataset_root: Optional[Path]) -> str:
+    path = Path(chunk_path)
+    if dataset_root is not None:
+        try:
+            rel = path.relative_to(dataset_root)
+            return str(rel)
+        except ValueError:
+            pass
+    return path.name
+
+
+def _format_histogram(values: Sequence[int]) -> str:
+    if not values:
+        return "n/a"
+    max_val = max(values)
+    counts = [0] * (max_val + 1)
+    for v in values:
+        if 0 <= v <= max_val:
+            counts[v] += 1
+    parts = [f"{i}:{counts[i]}" for i in range(1, max_val + 1)]
+    return " ".join(parts)
 
 
 def list_chunk_files(dataset_root: Path, scenes: Optional[Sequence[str]] = None) -> List[Path]:
@@ -399,6 +487,13 @@ class ChunkDataset(Dataset):
         self._label_chunk_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
         # Track label chunk files that failed to load to avoid repeated errors.
         self._bad_label_chunks: Set[Path] = set()
+        # Best-effort cache stats (only reliable when num_workers=0).
+        self._chunk_cache_hits = 0
+        self._chunk_cache_misses = 0
+        self._label_cache_hits = 0
+        self._label_cache_misses = 0
+        self._label_chunk_cache_hits = 0
+        self._label_chunk_cache_misses = 0
 
         # Fast label remap via LUT (vectorized). This avoids Python loops per sample.
         # We keep a reasonably sized LUT for 16-bit label PNGs.
@@ -446,10 +541,38 @@ class ChunkDataset(Dataset):
         return {
             "scene_id": sample["scene_id"],
             "frame_path": sample["frame_path"],
+            "chunk_path": sample["chunk_path"],
             "dino": dino,
             "dpt_levels": dpt_levels,
             "label": label,
             "image_size": sample["image_size"],
+        }
+
+    def reset_cache_stats(self) -> None:
+        self._chunk_cache_hits = 0
+        self._chunk_cache_misses = 0
+        self._label_cache_hits = 0
+        self._label_cache_misses = 0
+        self._label_chunk_cache_hits = 0
+        self._label_chunk_cache_misses = 0
+
+    def get_cache_stats(self) -> Dict[str, Dict[str, int]]:
+        return {
+            "chunk_cache": {
+                "hits": self._chunk_cache_hits,
+                "misses": self._chunk_cache_misses,
+                "enabled": 1,
+            },
+            "label_cache": {
+                "hits": self._label_cache_hits,
+                "misses": self._label_cache_misses,
+                "enabled": 1 if self.label_cache_size > 0 else 0,
+            },
+            "label_chunk_cache": {
+                "hits": self._label_chunk_cache_hits,
+                "misses": self._label_chunk_cache_misses,
+                "enabled": 1 if self.use_label_chunks else 0,
+            },
         }
 
     def _get_label(self, path: Path) -> torch.Tensor:
@@ -458,7 +581,9 @@ class ChunkDataset(Dataset):
         if path in self._label_cache:
             t = self._label_cache.pop(path)
             self._label_cache[path] = t
+            self._label_cache_hits += 1
             return t
+        self._label_cache_misses += 1
         t = load_label_png(path)
         self._label_cache[path] = t
         if len(self._label_cache) > self.label_cache_size:
@@ -470,7 +595,9 @@ class ChunkDataset(Dataset):
         if path in self._label_chunk_cache:
             labels = self._label_chunk_cache.pop(path)
             self._label_chunk_cache[path] = labels
+            self._label_chunk_cache_hits += 1
         else:
+            self._label_chunk_cache_misses += 1
             payload = torch.load(path, map_location="cpu")
             if "labels" not in payload:
                 raise KeyError(f"Label chunk missing 'labels' tensor: {path}")
@@ -490,7 +617,9 @@ class ChunkDataset(Dataset):
         if path in self._cache:
             chk = self._cache.pop(path)
             self._cache[path] = chk
+            self._chunk_cache_hits += 1
             return chk
+        self._chunk_cache_misses += 1
         chk = torch.load(path, map_location="cpu")
         self._cache[path] = chk
         if len(self._cache) > self.cache_size:
@@ -615,8 +744,64 @@ def collate_fn(batch: List[Dict]) -> Dict:
         "dino": dino,
         "dpt_levels": dpt_levels,
         "labels": labels,
+        "chunk_paths": [b["chunk_path"] for b in batch],
         "image_sizes": [b["image_size"] for b in batch],
     }
+
+
+def _maybe_synchronize(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def _timed_dl_iter(dl: DataLoader):
+    it = iter(dl)
+    while True:
+        start = time.perf_counter()
+        try:
+            batch = next(it)
+        except StopIteration:
+            return
+        yield time.perf_counter() - start, batch
+
+
+def run_chunk_shuffle_check(
+    *,
+    dl: DataLoader,
+    max_batches: int,
+    dataset_root: Optional[Path],
+) -> None:
+    if max_batches <= 0:
+        return
+    unique_counts: List[int] = []
+    mixed_batches: List[Tuple[int, int, List[str]]] = []
+    for batch_idx, batch in enumerate(dl):
+        if batch_idx >= max_batches:
+            break
+        chunk_paths = batch.get("chunk_paths") or []
+        chunk_ids = [_short_chunk_id(p, dataset_root) for p in chunk_paths]
+        unique = len(set(chunk_ids))
+        unique_counts.append(unique)
+        if unique > 1:
+            mixed_batches.append((unique, batch_idx, chunk_ids))
+    if not unique_counts:
+        print("[check] no batches produced by DataLoader.")
+        return
+    avg_unique = sum(unique_counts) / len(unique_counts)
+    med_unique = statistics.median(unique_counts)
+    hist = _format_histogram(unique_counts)
+    mixed_ratio = sum(1 for v in unique_counts if v > 1) / len(unique_counts)
+    print(
+        f"[check] unique_chunks_per_batch avg={avg_unique:.2f} "
+        f"median={med_unique:.1f} hist={hist} mixed_ratio={mixed_ratio:.2f}"
+    )
+    if mixed_batches:
+        worst = sorted(mixed_batches, key=lambda x: x[0], reverse=True)[:5]
+        for unique, batch_idx, chunk_ids in worst:
+            uniq_ids = sorted(set(chunk_ids))
+            print(
+                f"[check] batch={batch_idx} unique_chunks={unique} chunks={uniq_ids}"
+            )
 
 
 class ChunkShuffleSampler(Sampler[int]):
@@ -633,12 +818,19 @@ class ChunkShuffleSampler(Sampler[int]):
             self._chunk_to_indices.setdefault(s["chunk_path"], []).append(i)
         self._chunks: List[str] = list(self._chunk_to_indices.keys())
         self.epoch = 0
+        self.start_offset = 0
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
 
+    def set_start_offset(self, offset: int) -> None:
+        self.start_offset = max(0, int(offset))
+
     def __len__(self) -> int:
-        return sum(len(v) for v in self._chunk_to_indices.values())
+        total = sum(len(v) for v in self._chunk_to_indices.values())
+        if self.start_offset:
+            return max(0, total - self.start_offset)
+        return total
 
     def __iter__(self):
         g = torch.Generator()
@@ -652,18 +844,24 @@ class ChunkShuffleSampler(Sampler[int]):
         else:
             chunks = [chunks[i] for i in torch.randperm(len(chunks)).tolist()]
 
-        for chk in chunks:
-            idxs = self._chunk_to_indices[chk]
-            if len(idxs) <= 1:
-                for i in idxs:
-                    yield i
-                continue
-            if self.seed:
-                local_perm = torch.randperm(len(idxs), generator=g).tolist()
-            else:
-                local_perm = torch.randperm(len(idxs)).tolist()
-            for j in local_perm:
-                yield idxs[j]
+        def _iter_indices():
+            for chk in chunks:
+                idxs = self._chunk_to_indices[chk]
+                if len(idxs) <= 1:
+                    for i in idxs:
+                        yield i
+                    continue
+                if self.seed:
+                    local_perm = torch.randperm(len(idxs), generator=g).tolist()
+                else:
+                    local_perm = torch.randperm(len(idxs)).tolist()
+                for j in local_perm:
+                    yield idxs[j]
+
+        iterator = _iter_indices()
+        if self.start_offset:
+            iterator = itertools.islice(iterator, self.start_offset, None)
+        yield from iterator
 
 
 def focal_loss(
@@ -720,6 +918,16 @@ def _atomic_save_checkpoint(path: Path, payload: Dict) -> Path:
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataset_root = Path(args.dataset_root).expanduser()
+    pin_memory = True
+    persistent_workers = args.persistent_workers and args.num_workers > 0
+    prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None
+    _log_startup_info(
+        args,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+    )
 
     # Reasonable defaults for speed on modern NVIDIA GPUs.
     if device.type == "cuda":
@@ -756,7 +964,7 @@ def main() -> None:
         else:
             print(f"[info] remap_classes_file provided; keeping user num_classes={args.num_classes}")
 
-    chunk_files = list_chunk_files(Path(args.dataset_root), scenes=scenes)
+    chunk_files = list_chunk_files(dataset_root, scenes=scenes)
     if args.max_chunks:
         chunk_files = chunk_files[: args.max_chunks]
 
@@ -785,10 +993,12 @@ def main() -> None:
     shuffle = False
     if args.shuffle_mode == "global":
         shuffle = True
+        # TODO: add resume offset support for global shuffle mode to avoid skip-on-resume cost.
     elif args.shuffle_mode == "chunk":
         sampler = ChunkShuffleSampler(samples, seed=args.seed)
     elif args.shuffle_mode == "none":
         shuffle = False
+        # TODO: add resume offset support for non-shuffled mode to avoid skip-on-resume cost.
     else:
         raise ValueError(f"Unknown shuffle mode: {args.shuffle_mode}")
 
@@ -799,10 +1009,19 @@ def main() -> None:
         sampler=sampler,
         num_workers=args.num_workers,
         collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=args.persistent_workers and args.num_workers > 0,
-        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
+
+    diagnose_batches = max(0, int(args.diagnose_dataloader))
+    check_batches = max(0, int(args.check_chunk_shuffle))
+    if check_batches > 0:
+        if isinstance(sampler, ChunkShuffleSampler):
+            sampler.set_epoch(0)
+            sampler.set_start_offset(0)
+        run_chunk_shuffle_check(dl=dl, max_batches=check_batches, dataset_root=dataset_root)
+        return
 
     model = FusionMask2Former(
         device=device,
@@ -871,7 +1090,52 @@ def main() -> None:
         print(f"[info] start_epoch {start_epoch} >= total epochs {args.epochs}; nothing to train.")
         return
 
+    resume_sample_offset = 0
+    if start_step_in_epoch > 0:
+        resume_sample_offset = start_step_in_epoch * int(args.batch_size)
+
     last_save_time = time.time()
+    diagnose_active = diagnose_batches > 0
+    diagnose_remaining = diagnose_batches
+    diag_fetch_times: List[float] = []
+    diag_step_times: List[float] = []
+    diag_unique_counts: List[int] = []
+    diag_summary_printed = False
+
+    def _print_diag_summary() -> None:
+        nonlocal diag_summary_printed
+        if diag_summary_printed or not diag_fetch_times:
+            return
+        avg_fetch = sum(diag_fetch_times) / len(diag_fetch_times)
+        med_fetch = statistics.median(diag_fetch_times)
+        avg_step = sum(diag_step_times) / len(diag_step_times)
+        med_step = statistics.median(diag_step_times)
+        avg_unique = sum(diag_unique_counts) / len(diag_unique_counts)
+        hist = _format_histogram(diag_unique_counts)
+        cache_info = "cache_stats=unavailable (num_workers>0)"
+        if args.num_workers == 0:
+            stats = ds.get_cache_stats()
+            parts = []
+            for key, info in stats.items():
+                if not info.get("enabled"):
+                    parts.append(f"{key}=disabled")
+                    continue
+                total = int(info.get("hits", 0)) + int(info.get("misses", 0))
+                rate = (info.get("hits", 0) / total) if total else 0.0
+                parts.append(f"{key}_hit_rate={rate:.2f}")
+            cache_info = " ".join(parts)
+        print(
+            "[diag] summary "
+            f"n={len(diag_fetch_times)} "
+            f"t_fetch_ms_avg={avg_fetch * 1000:.1f} "
+            f"t_fetch_ms_med={med_fetch * 1000:.1f} "
+            f"t_step_ms_avg={avg_step * 1000:.1f} "
+            f"t_step_ms_med={med_step * 1000:.1f} "
+            f"unique_chunks_avg={avg_unique:.2f} "
+            f"hist={hist} "
+            f"{cache_info}"
+        )
+        diag_summary_printed = True
 
     def save_checkpoint(epoch_idx: int, step_in_epoch: int, reason: str) -> Optional[Path]:
         if not _is_rank0():
@@ -896,14 +1160,39 @@ def main() -> None:
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
             sampler.set_epoch(epoch)
+            if epoch == start_epoch and resume_sample_offset > 0:
+                sampler.set_start_offset(resume_sample_offset)
+                skip_steps = 0
+            else:
+                sampler.set_start_offset(0)
+                skip_steps = 0
+        else:
+            skip_steps = start_step_in_epoch if epoch == start_epoch else 0
         if epoch > start_epoch:
             start_step_in_epoch = 0
         step_in_epoch = -1
         running = 0.0
-        for step, batch in enumerate(tqdm(dl, desc=f"epoch {epoch+1}/{args.epochs}")):
-            if step < start_step_in_epoch:
+        diagnose_epoch = diagnose_active and epoch == start_epoch
+        if diagnose_epoch and args.num_workers == 0:
+            ds.reset_cache_stats()
+        data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
+        data_tqdm = tqdm(
+            data_iter,
+            total=len(dl),
+            desc=f"epoch {epoch+1}/{args.epochs}",
+        )
+        for step, data in enumerate(data_tqdm):
+            if step < skip_steps:
                 # Skip steps already completed before checkpoint.
                 continue
+            if diagnose_epoch:
+                t_fetch, batch = data
+            else:
+                t_fetch, batch = None, data
+            diagnose_now = diagnose_epoch and diagnose_remaining > 0
+            if diagnose_now:
+                _maybe_synchronize(device)
+                t_step_start = time.perf_counter()
             dino = batch["dino"].to(device, non_blocking=True)
             dpt_levels = [lvl.to(device, non_blocking=True) for lvl in batch["dpt_levels"]]
             # labels list; assume all same H,W within batch
@@ -932,6 +1221,38 @@ def main() -> None:
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
+            if diagnose_now:
+                _maybe_synchronize(device)
+                t_step = time.perf_counter() - t_step_start
+                diag_fetch_times.append(float(t_fetch))
+                diag_step_times.append(t_step)
+                chunk_paths = batch.get("chunk_paths") or []
+                chunk_ids = [_short_chunk_id(p, dataset_root) for p in chunk_paths]
+                unique_chunks = len(set(chunk_ids))
+                diag_unique_counts.append(unique_chunks)
+                if args.num_workers == 0:
+                    stats = ds.get_cache_stats()
+                    cache_parts = []
+                    for key in ("chunk_cache", "label_cache", "label_chunk_cache"):
+                        info = stats.get(key, {})
+                        if not info.get("enabled"):
+                            cache_parts.append(f"{key}=disabled")
+                        else:
+                            cache_parts.append(f"{key}={info.get('hits', 0)}/{info.get('misses', 0)}")
+                    cache_msg = " cache=" + " ".join(cache_parts)
+                else:
+                    cache_msg = " cache=unavailable"
+                print(
+                    f"[diag] epoch={epoch+1} step={step+1} "
+                    f"t_fetch_ms={t_fetch * 1000:.1f} "
+                    f"t_step_ms={t_step * 1000:.1f} "
+                    f"unique_chunks={unique_chunks} "
+                    f"chunks={chunk_ids}"
+                    f"{cache_msg}"
+                )
+                diagnose_remaining -= 1
+                if diagnose_remaining == 0:
+                    _print_diag_summary()
 
             running += loss.item()
             global_step += 1
@@ -953,6 +1274,10 @@ def main() -> None:
                     request_save_file.unlink()
                 except FileNotFoundError:
                     pass
+
+        if diagnose_epoch:
+            _print_diag_summary()
+            diagnose_active = False
 
         # End-of-epoch checkpoint
         save_checkpoint(epoch, step_in_epoch, reason="epoch_end")
