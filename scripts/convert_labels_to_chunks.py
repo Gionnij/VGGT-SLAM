@@ -8,7 +8,7 @@ This avoids decoding hundreds of small PNGs during training and keeps label
 I/O aligned with the pre-exported embedding chunks.
 
 Default layout (mirrors export_embeddings.py output):
-  <dataset_root>/<scene>/chunks/*.pt         # embeddings (input)
+  <dataset_root>/<scene>/chunks/*.pt or *.safetensors (+ .json)  # embeddings (input)
   <dataset_root>/<scene>/labels/*.png        # label PNGs (input)
   <dataset_root>/<scene>/label_chunks/*.pt   # label tensors (output)
 
@@ -19,6 +19,7 @@ frame order as chunk["frame_paths"].
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -100,7 +101,21 @@ def iter_chunks(scene_dir: Path, chunk_subdir: str) -> Iterable[Path]:
     chunk_dir = scene_dir / chunk_subdir
     if not chunk_dir.is_dir():
         return []
-    return sorted(p for p in chunk_dir.glob("*.pt") if p.is_file())
+    pt_files = sorted(p for p in chunk_dir.glob("*.pt") if p.is_file())
+    st_files = sorted(p for p in chunk_dir.glob("*.safetensors") if p.is_file())
+    st_stems = {p.stem for p in st_files}
+    pt_files = [p for p in pt_files if p.stem not in st_stems]
+    return sorted(st_files + pt_files)
+
+
+def load_chunk_metadata(chunk_path: Path) -> Dict:
+    if chunk_path.suffix == ".safetensors":
+        json_path = chunk_path.with_suffix(".json")
+        if not json_path.is_file():
+            raise FileNotFoundError(f"Missing chunk metadata JSON for {chunk_path}")
+        with json_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    return torch.load(chunk_path, map_location="cpu")
 
 
 def convert_chunk(
@@ -116,7 +131,7 @@ def convert_chunk(
     if out_path.exists() and not overwrite:
         return out_path
 
-    chk = torch.load(chunk_path, map_location="cpu")
+    chk = load_chunk_metadata(chunk_path)
     frame_paths: Sequence[str] = chk.get("frame_paths") or []
     image_size = chk.get("image_size")
     if not frame_paths:

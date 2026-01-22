@@ -730,10 +730,7 @@ class ChunkDataset(Dataset):
             self._label_chunk_cache_hits += 1
         else:
             self._label_chunk_cache_misses += 1
-            payload = torch.load(path, map_location="cpu")
-            if "labels" not in payload:
-                raise KeyError(f"Label chunk missing 'labels' tensor: {path}")
-            labels = payload["labels"]
+            labels = self._load_label_chunk_tensor(path)
             if labels.dim() < 3:
                 raise ValueError(f"Label chunk tensor has unexpected shape {labels.shape} in {path}")
             self._label_chunk_cache[path] = labels
@@ -742,6 +739,20 @@ class ChunkDataset(Dataset):
         if frame_idx >= labels.shape[0]:
             raise IndexError(f"frame_idx {frame_idx} out of bounds for label chunk {path}")
         return labels[frame_idx].long()
+
+    def _load_label_chunk_tensor(self, path: Path) -> torch.Tensor:
+        if path.suffix == ".safetensors":
+            from safetensors.torch import load_file
+
+            tensors = load_file(str(path))
+            labels = tensors.get("labels")
+            if labels is None:
+                raise KeyError(f"Label chunk missing 'labels' tensor: {path}")
+            return labels
+        payload = torch.load(path, map_location="cpu")
+        if "labels" not in payload:
+            raise KeyError(f"Label chunk missing 'labels' tensor: {path}")
+        return payload["labels"]
 
     def _get_chunk(self, path: Path) -> Dict:
         path = Path(path)
@@ -1340,6 +1351,7 @@ def main() -> None:
         print(f"[checkpoint] saved ({reason}) -> {out_path}")
         return out_path
 
+    global_bar = tqdm(total=0, desc="train", unit="step")
     for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
@@ -1371,13 +1383,11 @@ def main() -> None:
         diagnose_epoch = diagnose_active and epoch == start_epoch
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
+        steps_this_epoch = max(0, len(dl) - skip_steps)
+        global_bar.total += steps_this_epoch
+        global_bar.refresh()
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
-        data_tqdm = tqdm(
-            data_iter,
-            total=len(dl),
-            desc=f"epoch {epoch+1}/{args.epochs}",
-        )
-        for step, data in enumerate(data_tqdm):
+        for step, data in enumerate(data_iter):
             if step < skip_steps:
                 # Skip steps already completed before checkpoint.
                 continue
@@ -1462,6 +1472,7 @@ def main() -> None:
             running += loss.item()
             global_step += 1
             step_in_epoch = step
+            global_bar.update(1)
             if (step + 1) % 10 == 0:
                 avg = running / 10
                 print(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
@@ -1489,6 +1500,7 @@ def main() -> None:
         last_save_time = time.time()
 
     print("Training finished.")
+    global_bar.close()
 
 
 if __name__ == "__main__":
