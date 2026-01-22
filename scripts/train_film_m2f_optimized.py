@@ -15,6 +15,7 @@ across chunks are deduplicated by keeping the first occurrence.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from collections import OrderedDict
@@ -23,6 +24,8 @@ import time
 import itertools
 import os
 import statistics
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
 import torch.nn as nn
@@ -53,7 +56,17 @@ def parse_args() -> argparse.Namespace:
         "Updated after each scan to include new/changed chunks.",
     )
     p.add_argument("--batch-size", type=int, default=1, help="Frames per batch (keep small for memory).")
-    p.add_argument("--num-workers", type=int, default=2, help="DataLoader workers.")
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="DataLoader workers (default: auto).",
+    )
+    p.add_argument(
+        "--num-workers-auto",
+        action="store_true",
+        help="Use automatic num_workers selection (overrides --num-workers if set).",
+    )
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
@@ -158,6 +171,25 @@ def parse_args() -> argparse.Namespace:
         help="Prefetch factor per worker for DataLoader (when num_workers > 0).",
     )
     p.add_argument(
+        "--prefetch-next-chunk",
+        dest="prefetch_next_chunk",
+        action="store_true",
+        help="Prefetch the next chunk asynchronously when num_workers=0.",
+    )
+    p.add_argument(
+        "--no-prefetch-next-chunk",
+        dest="prefetch_next_chunk",
+        action="store_false",
+        help="Disable next-chunk prefetch even when num_workers=0.",
+    )
+    p.set_defaults(prefetch_next_chunk=None)
+    p.add_argument(
+        "--chunk-format",
+        choices=["auto", "pt", "safetensors"],
+        default="auto",
+        help="Chunk storage format to load (auto prefers safetensors when present).",
+    )
+    p.add_argument(
         "--diagnose-dataloader",
         type=int,
         default=0,
@@ -209,12 +241,24 @@ def _read_env_int(name: str) -> Optional[int]:
         return None
 
 
+def _is_deepstore_path(path: Path) -> bool:
+    path_str = str(path)
+    return path_str.startswith("/deepstore") or "/deepstore/" in path_str
+
+
+def _auto_num_workers(dataset_root: Path) -> int:
+    if _is_deepstore_path(dataset_root):
+        return 0
+    return 1
+
+
 def _log_startup_info(
     args: argparse.Namespace,
     *,
     pin_memory: bool,
     prefetch_factor: Optional[int],
     persistent_workers: bool,
+    num_workers: int,
 ) -> None:
     cpu_count = os.cpu_count()
     nproc = _get_nproc()
@@ -229,15 +273,15 @@ def _log_startup_info(
         f"OMP_NUM_THREADS={omp_threads}"
     )
     print(
-        f"[info] dataloader num_workers={args.num_workers} "
+        f"[info] dataloader num_workers={num_workers} "
         f"prefetch_factor={prefetch_factor} "
         f"persistent_workers={persistent_workers} "
         f"pin_memory={pin_memory}"
     )
     slurm_cpus_int = _read_env_int("SLURM_CPUS_PER_TASK")
-    if slurm_cpus_int is not None and slurm_cpus_int < args.num_workers:
+    if slurm_cpus_int is not None and slurm_cpus_int < num_workers:
         print(
-            f"[warn] SLURM_CPUS_PER_TASK={slurm_cpus_int} < num_workers={args.num_workers}; "
+            f"[warn] SLURM_CPUS_PER_TASK={slurm_cpus_int} < num_workers={num_workers}; "
             "worker oversubscription likely."
         )
 
@@ -265,7 +309,59 @@ def _format_histogram(values: Sequence[int]) -> str:
     return " ".join(parts)
 
 
-def list_chunk_files(dataset_root: Path, scenes: Optional[Sequence[str]] = None) -> List[Path]:
+def _chunk_order_from_samples(samples: Sequence[Dict]) -> List[str]:
+    order: List[str] = []
+    seen: Set[str] = set()
+    for sample in samples:
+        chk = sample.get("chunk_path")
+        if chk and chk not in seen:
+            seen.add(chk)
+            order.append(chk)
+    return order
+
+
+def _chunk_json_path(chunk_path: Path) -> Path:
+    return chunk_path.with_suffix(".json")
+
+
+def _load_chunk_metadata(chunk_path: Path) -> Dict:
+    if chunk_path.suffix == ".safetensors":
+        json_path = _chunk_json_path(chunk_path)
+        if not json_path.is_file():
+            raise FileNotFoundError(f"Missing chunk metadata JSON for {chunk_path}")
+        with json_path.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return meta
+    return torch.load(chunk_path, map_location="cpu")
+
+
+def _load_safetensors_chunk(chunk_path: Path) -> Dict:
+    from safetensors.torch import load_file
+
+    tensors = load_file(str(chunk_path))
+    meta = _load_chunk_metadata(chunk_path)
+    keys = meta.get("dpt_pyramid_keys")
+    if not keys:
+        keys = sorted(
+            [k for k in tensors.keys() if k.startswith("dpt_pyramid_")],
+            key=lambda x: int(x.split("_")[-1]),
+        )
+    if not keys:
+        raise KeyError(f"No dpt_pyramid_* tensors found in {chunk_path}")
+    dpt_pyramid = [tensors[k] for k in keys]
+    dino = tensors["dino_features"]
+    return {
+        "dino_features": dino,
+        "dpt_pyramid": dpt_pyramid,
+    }
+
+
+def list_chunk_files(
+    dataset_root: Path,
+    *,
+    scenes: Optional[Sequence[str]] = None,
+    chunk_format: str = "auto",
+) -> List[Path]:
     chunk_files: List[Path] = []
     scene_filter = set(scenes) if scenes else None
     for scene_dir in sorted(dataset_root.iterdir()):
@@ -276,7 +372,17 @@ def list_chunk_files(dataset_root: Path, scenes: Optional[Sequence[str]] = None)
         chunk_dir = scene_dir / "chunks"
         if not chunk_dir.is_dir():
             continue
-        chunk_files.extend(sorted(chunk_dir.glob("*.pt")))
+        pt_files = sorted(chunk_dir.glob("*.pt"))
+        st_files = sorted(chunk_dir.glob("*.safetensors"))
+        if chunk_format == "pt":
+            chosen = pt_files
+        elif chunk_format == "safetensors":
+            chosen = st_files
+        else:
+            st_stems = {p.stem for p in st_files}
+            pt_files = [p for p in pt_files if p.stem not in st_stems]
+            chosen = st_files + pt_files
+        chunk_files.extend(chosen)
     if not chunk_files:
         raise RuntimeError("No chunk files found with given filters.")
     return chunk_files
@@ -374,11 +480,13 @@ def build_or_load_index(
                 new_samples.append(samp)
             continue
 
-        # need to read chunk
-        chk = torch.load(chk_path, map_location="cpu")
+        # need to read chunk metadata
+        chk = _load_chunk_metadata(chk_path)
         scene_id = chk["scene_id"]
         scene_dir = chk_path.parent.parent  # .../<scene>/
-        frame_paths = chk["frame_paths"]
+        frame_paths = chk.get("frame_paths")
+        if frame_paths is None:
+            raise KeyError(f"Chunk metadata missing frame_paths: {chk_path}")
         image_size = chk["image_size"]
         label_chunk_path = label_chunk_lookup.get(chk_key)
         for fidx, fpath in enumerate(frame_paths):
@@ -469,6 +577,7 @@ class ChunkDataset(Dataset):
         label_cache_size: int = 0,
         label_chunk_cache_size: int = 2,
         use_label_chunks: bool = True,
+        prefetch_next_chunk: bool = False,
     ) -> None:
         self.samples: List[Dict] = list(samples)
         self.ignore_classes: Set[int] = set(ignore_classes or [])
@@ -487,6 +596,11 @@ class ChunkDataset(Dataset):
         self._label_chunk_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
         # Track label chunk files that failed to load to avoid repeated errors.
         self._bad_label_chunks: Set[Path] = set()
+        self._cache_lock = threading.Lock()
+
+        self._prefetch_enabled = bool(prefetch_next_chunk)
+        self._prefetch_executor: Optional[ThreadPoolExecutor] = None
+        self._prefetch_inflight: Dict[Path, Future] = {}
         # Best-effort cache stats (only reliable when num_workers=0).
         self._chunk_cache_hits = 0
         self._chunk_cache_misses = 0
@@ -575,6 +689,24 @@ class ChunkDataset(Dataset):
             },
         }
 
+    def _ensure_prefetch_executor(self) -> ThreadPoolExecutor:
+        if self._prefetch_executor is None:
+            self._prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chunk_prefetch")
+        return self._prefetch_executor
+
+    def prefetch_chunk(self, path: Optional[str]) -> None:
+        if not self._prefetch_enabled or not path:
+            return
+        chunk_path = Path(path)
+        if not chunk_path.is_file():
+            return
+        with self._cache_lock:
+            if chunk_path in self._cache or chunk_path in self._prefetch_inflight:
+                return
+            executor = self._ensure_prefetch_executor()
+            fut = executor.submit(self._load_chunk_from_disk, chunk_path)
+            self._prefetch_inflight[chunk_path] = fut
+
     def _get_label(self, path: Path) -> torch.Tensor:
         if self.label_cache_size <= 0:
             return load_label_png(path)
@@ -613,18 +745,36 @@ class ChunkDataset(Dataset):
 
     def _get_chunk(self, path: Path) -> Dict:
         path = Path(path)
-        # Simple LRU cache
-        if path in self._cache:
-            chk = self._cache.pop(path)
+        # Simple LRU cache with optional prefetch support.
+        with self._cache_lock:
+            if path in self._cache:
+                chk = self._cache.pop(path)
+                self._cache[path] = chk
+                self._chunk_cache_hits += 1
+                return chk
+            fut = self._prefetch_inflight.pop(path, None)
+        if fut is not None:
+            try:
+                chk = fut.result()
+                if chk is not None:
+                    self._chunk_cache_hits += 1
+            except Exception:
+                chk = None
+        else:
+            chk = None
+        if chk is None:
+            self._chunk_cache_misses += 1
+            chk = self._load_chunk_from_disk(path)
+        with self._cache_lock:
             self._cache[path] = chk
-            self._chunk_cache_hits += 1
-            return chk
-        self._chunk_cache_misses += 1
-        chk = torch.load(path, map_location="cpu")
-        self._cache[path] = chk
-        if len(self._cache) > self.cache_size:
-            self._cache.popitem(last=False)
+            if len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
         return chk
+
+    def _load_chunk_from_disk(self, path: Path) -> Dict:
+        if path.suffix == ".safetensors":
+            return _load_safetensors_chunk(path)
+        return torch.load(path, map_location="cpu")
 
 
 def load_label_png(path: Path) -> torch.Tensor:
@@ -833,16 +983,7 @@ class ChunkShuffleSampler(Sampler[int]):
         return total
 
     def __iter__(self):
-        g = torch.Generator()
-        # seed==0 => let PyTorch default randomness vary; otherwise stable per epoch
-        if self.seed:
-            g.manual_seed(self.seed + self.epoch)
-        chunks = self._chunks
-        if self.seed:
-            perm = torch.randperm(len(chunks), generator=g).tolist()
-            chunks = [chunks[i] for i in perm]
-        else:
-            chunks = [chunks[i] for i in torch.randperm(len(chunks)).tolist()]
+        chunks = self._get_epoch_chunks()
 
         def _iter_indices():
             for chk in chunks:
@@ -862,6 +1003,22 @@ class ChunkShuffleSampler(Sampler[int]):
         if self.start_offset:
             iterator = itertools.islice(iterator, self.start_offset, None)
         yield from iterator
+
+    def _get_epoch_chunks(self) -> List[str]:
+        g = torch.Generator()
+        # seed==0 => let PyTorch default randomness vary; otherwise stable per epoch
+        if self.seed:
+            g.manual_seed(self.seed + self.epoch)
+        chunks = self._chunks
+        if self.seed:
+            perm = torch.randperm(len(chunks), generator=g).tolist()
+            chunks = [chunks[i] for i in perm]
+        else:
+            chunks = [chunks[i] for i in torch.randperm(len(chunks)).tolist()]
+        return chunks
+
+    def get_epoch_chunk_order(self) -> List[str]:
+        return self._get_epoch_chunks()
 
 
 def focal_loss(
@@ -919,6 +1076,31 @@ def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset_root = Path(args.dataset_root).expanduser()
+    if args.num_workers_auto or args.num_workers is None:
+        auto_workers = _auto_num_workers(dataset_root)
+        if args.num_workers is not None and args.num_workers != auto_workers:
+            print(f"[info] num_workers auto override {args.num_workers} -> {auto_workers}")
+        else:
+            print(f"[info] num_workers auto -> {auto_workers} (dataset_root={dataset_root})")
+        args.num_workers = auto_workers
+    if args.num_workers is None:
+        args.num_workers = 0
+    args.num_workers = max(0, int(args.num_workers))
+    if _is_deepstore_path(dataset_root) and args.num_workers > 1:
+        print(
+            "[warn] num_workers>1 on deepstore can amplify I/O (per-worker caches duplicate chunk loads). "
+            "Consider --num-workers 0 or 1."
+        )
+    if args.num_workers > 1:
+        print(
+            "[warn] num_workers>1 duplicates chunk/label caches per worker; can increase I/O on shared filesystems."
+        )
+    prefetch_next_chunk = args.prefetch_next_chunk
+    if prefetch_next_chunk is None:
+        prefetch_next_chunk = args.num_workers == 0
+    if prefetch_next_chunk and args.num_workers != 0:
+        print("[warn] next-chunk prefetch is only supported with num_workers=0; disabling.")
+        prefetch_next_chunk = False
     pin_memory = True
     persistent_workers = args.persistent_workers and args.num_workers > 0
     prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None
@@ -927,6 +1109,7 @@ def main() -> None:
         pin_memory=pin_memory,
         prefetch_factor=prefetch_factor,
         persistent_workers=persistent_workers,
+        num_workers=args.num_workers,
     )
 
     # Reasonable defaults for speed on modern NVIDIA GPUs.
@@ -964,7 +1147,7 @@ def main() -> None:
         else:
             print(f"[info] remap_classes_file provided; keeping user num_classes={args.num_classes}")
 
-    chunk_files = list_chunk_files(dataset_root, scenes=scenes)
+    chunk_files = list_chunk_files(dataset_root, scenes=scenes, chunk_format=args.chunk_format)
     if args.max_chunks:
         chunk_files = chunk_files[: args.max_chunks]
 
@@ -988,6 +1171,7 @@ def main() -> None:
         label_cache_size=args.label_cache_size,
         label_chunk_cache_size=args.label_chunk_cache_size,
         use_label_chunks=args.use_label_chunks,
+        prefetch_next_chunk=prefetch_next_chunk,
     )
     sampler: Optional[Sampler[int]] = None
     shuffle = False
@@ -1170,6 +1354,18 @@ def main() -> None:
             skip_steps = start_step_in_epoch if epoch == start_epoch else 0
         if epoch > start_epoch:
             start_step_in_epoch = 0
+        next_chunk_map: Optional[Dict[str, str]] = None
+        if prefetch_next_chunk and args.num_workers == 0:
+            chunk_order: Optional[List[str]] = None
+            if isinstance(sampler, ChunkShuffleSampler):
+                chunk_order = sampler.get_epoch_chunk_order()
+            elif args.shuffle_mode == "none":
+                chunk_order = _chunk_order_from_samples(samples)
+            if chunk_order:
+                next_chunk_map = {
+                    chunk_order[i]: chunk_order[i + 1] for i in range(len(chunk_order) - 1)
+                }
+        last_prefetched: Optional[str] = None
         step_in_epoch = -1
         running = 0.0
         diagnose_epoch = diagnose_active and epoch == start_epoch
@@ -1193,6 +1389,15 @@ def main() -> None:
             if diagnose_now:
                 _maybe_synchronize(device)
                 t_step_start = time.perf_counter()
+            if next_chunk_map:
+                chunk_paths = batch.get("chunk_paths") or []
+                if chunk_paths:
+                    unique_chunks = sorted(set(chunk_paths))
+                    if len(unique_chunks) == 1:
+                        next_chunk = next_chunk_map.get(unique_chunks[0])
+                        if next_chunk and next_chunk != last_prefetched:
+                            ds.prefetch_chunk(next_chunk)
+                            last_prefetched = next_chunk
             dino = batch["dino"].to(device, non_blocking=True)
             dpt_levels = [lvl.to(device, non_blocking=True) for lvl in batch["dpt_levels"]]
             # labels list; assume all same H,W within batch

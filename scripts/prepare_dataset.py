@@ -10,7 +10,7 @@ dataset_ready/
   <scene_id>/
     images/*.JPG
     labels/*.JPG.png
-    chunks/*.pt
+    chunks/*.pt or chunks/*.safetensors (+ sidecar .json)
     meta.json
 
 This avoids juggling multiple roots during training.
@@ -106,7 +106,12 @@ def main() -> None:
             copy_many(lbls, dest_scene / "labels", overwrite=args.overwrite)
 
         # Copy chunks + meta
-        copy_many(sorted(src_chunks.glob("*.pt")), dest_scene / "chunks", overwrite=args.overwrite)
+        chunk_files = (
+            list(src_chunks.glob("*.pt"))
+            + list(src_chunks.glob("*.safetensors"))
+            + list(src_chunks.glob("*.json"))
+        )
+        copy_many(sorted(chunk_files), dest_scene / "chunks", overwrite=args.overwrite)
         dest_meta = dest_scene / "meta.json"
         dest_meta.parent.mkdir(parents=True, exist_ok=True)
         if dest_meta.exists() and args.overwrite:

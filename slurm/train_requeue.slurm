@@ -10,6 +10,21 @@
 
 set -euo pipefail
 
+if [ -n "${CPUS_PER_TASK:-}" ]; then
+  echo "[env] CPUS_PER_TASK=${CPUS_PER_TASK} (note: set --cpus-per-task at submit time to change allocation)"
+fi
+if [ -n "${MEM:-}" ]; then
+  echo "[env] MEM=${MEM} (note: set --mem at submit time to change allocation)"
+fi
+if [ -z "${OMP_NUM_THREADS:-}" ]; then
+  if [ -n "${CPUS_PER_TASK:-}" ]; then
+    export OMP_NUM_THREADS="${CPUS_PER_TASK}"
+  else
+    export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+  fi
+fi
+echo "[env] OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+
 SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
 # Prefer the submit dir to avoid /tmp/slurmd paths when Slurm copies the script.
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
