@@ -23,6 +23,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Convert VGGT chunk .pt files to .safetensors + JSON metadata.")
     p.add_argument("--src-dir", required=True, help="Root directory containing <scene>/chunks/*.pt files.")
     p.add_argument("--dst-dir", required=True, help="Output root for converted chunks.")
+    p.add_argument("--scenes", help="Comma-separated list of scene ids to process.")
+    p.add_argument("--scenes-file", help="Optional file with one scene id per line to process.")
     p.add_argument("--dtype", choices=["fp16", "fp32"], default="fp16", help="Tensor dtype to store.")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing .safetensors outputs.")
     p.add_argument("--workers", type=int, default=1, help="Number of worker threads.")
@@ -30,8 +32,33 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def discover_chunks(root: Path) -> List[Path]:
-    return sorted([p for p in root.rglob("chunks/*.pt") if p.parent.name == "chunks"])
+def _load_scenes(args: argparse.Namespace, src_root: Path) -> Optional[List[str]]:
+    if args.scenes_file:
+        path = Path(args.scenes_file).expanduser()
+        scenes = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            name = line.strip()
+            if not name or name.startswith("#"):
+                continue
+            scenes.append(name)
+        return scenes
+    if args.scenes:
+        return [s.strip() for s in args.scenes.split(",") if s.strip()]
+    if src_root.is_dir():
+        return sorted([p.name for p in src_root.iterdir() if p.is_dir()])
+    return None
+
+
+def discover_chunks(root: Path, scenes: Optional[List[str]]) -> List[Path]:
+    if not scenes:
+        return sorted([p for p in root.rglob("chunks/*.pt") if p.parent.name == "chunks"])
+    out: List[Path] = []
+    for scene in scenes:
+        chunk_dir = root / scene / "chunks"
+        if not chunk_dir.is_dir():
+            continue
+        out.extend(sorted(chunk_dir.glob("*.pt")))
+    return out
 
 
 def _target_dtype(dtype_str: str) -> torch.dtype:
@@ -135,7 +162,8 @@ def main() -> None:
     args = parse_args()
     src_root = Path(args.src_dir).expanduser()
     dst_root = Path(args.dst_dir).expanduser()
-    chunk_files = discover_chunks(src_root)
+    scenes = _load_scenes(args, src_root)
+    chunk_files = discover_chunks(src_root, scenes)
     if not chunk_files:
         raise FileNotFoundError(f"No chunk .pt files found under {src_root}")
 
