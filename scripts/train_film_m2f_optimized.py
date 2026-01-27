@@ -26,6 +26,11 @@ import os
 import statistics
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+try:
+    from safetensors import SafetensorError
+except Exception:
+    class SafetensorError(Exception):
+        pass
 
 import torch
 import torch.nn as nn
@@ -636,7 +641,7 @@ class ChunkDataset(Dataset):
             if lc_path not in self._bad_label_chunks:
                 try:
                     label = self._get_label_from_chunk(lc_path, sample["frame_idx"])
-                except (FileNotFoundError, KeyError, IndexError, ValueError, RuntimeError, OSError, EOFError) as exc:
+                except (FileNotFoundError, KeyError, IndexError, ValueError, RuntimeError, OSError, EOFError, SafetensorError) as exc:
                     # Corrupted/incomplete chunk -> fall back to PNGs for this chunk.
                     if lc_path not in self._bad_label_chunks:
                         print(f"[warn] failed to load label chunk {lc_path}: {exc}; falling back to PNG labels")
