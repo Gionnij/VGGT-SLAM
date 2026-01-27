@@ -994,7 +994,8 @@ class ChunkShuffleSampler(Sampler[int]):
         return total
 
     def __iter__(self):
-        chunks = self._get_epoch_chunks()
+        g = self._get_epoch_generator()
+        chunks = self._get_epoch_chunks(g)
 
         def _iter_indices():
             for chk in chunks:
@@ -1015,11 +1016,16 @@ class ChunkShuffleSampler(Sampler[int]):
             iterator = itertools.islice(iterator, self.start_offset, None)
         yield from iterator
 
-    def _get_epoch_chunks(self) -> List[str]:
+    def _get_epoch_generator(self) -> torch.Generator:
         g = torch.Generator()
         # seed==0 => let PyTorch default randomness vary; otherwise stable per epoch
         if self.seed:
             g.manual_seed(self.seed + self.epoch)
+        return g
+
+    def _get_epoch_chunks(self, g: Optional[torch.Generator] = None) -> List[str]:
+        if g is None:
+            g = self._get_epoch_generator()
         chunks = self._chunks
         if self.seed:
             perm = torch.randperm(len(chunks), generator=g).tolist()
