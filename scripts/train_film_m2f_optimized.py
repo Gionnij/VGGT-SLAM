@@ -1357,7 +1357,8 @@ def main() -> None:
         print(f"[checkpoint] saved ({reason}) -> {out_path}")
         return out_path
 
-    global_bar = tqdm(total=0, desc="train", unit="step")
+    total_steps = len(dl) * (args.epochs - start_epoch)
+    global_bar = tqdm(total=total_steps, desc="train", unit="step")
     for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
@@ -1390,9 +1391,10 @@ def main() -> None:
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
         steps_this_epoch = max(0, len(dl) - skip_steps)
-        global_bar.total += steps_this_epoch
-        global_bar.refresh()
+        if epoch == start_epoch and skip_steps > 0:
+            global_bar.update(skip_steps)
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
+        epoch_bar = tqdm(total=steps_this_epoch, desc=f"epoch {epoch+1}/{args.epochs}", unit="step", leave=False)
         for step, data in enumerate(data_iter):
             if step < skip_steps:
                 # Skip steps already completed before checkpoint.
@@ -1479,9 +1481,10 @@ def main() -> None:
             global_step += 1
             step_in_epoch = step
             global_bar.update(1)
+            epoch_bar.update(1)
             if (step + 1) % 10 == 0:
                 avg = running / 10
-                print(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
+                tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 running = 0.0
 
             if args.save_every_minutes > 0:
@@ -1500,6 +1503,7 @@ def main() -> None:
         if diagnose_epoch:
             _print_diag_summary()
             diagnose_active = False
+        epoch_bar.close()
 
         # End-of-epoch checkpoint
         save_checkpoint(epoch, step_in_epoch, reason="epoch_end")
