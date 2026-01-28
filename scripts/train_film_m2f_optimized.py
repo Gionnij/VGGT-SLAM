@@ -322,7 +322,7 @@ def _format_eta_minutes(minutes: float) -> str:
     total = int(minutes + 0.5)
     hours = total // 60
     mins = total % 60
-    return f"{hours}h{mins:02d}m"
+    return f"{hours}h {mins:02d}m"
 
 
 def _chunk_order_from_samples(samples: Sequence[Dict]) -> List[str]:
@@ -1419,6 +1419,7 @@ def main() -> None:
             ds.reset_cache_stats()
         steps_this_epoch = steps_per_epoch
         resume_step = resume_step_in_epoch if epoch == start_epoch else 0
+        resume_offset = resume_step if (resume_step > 0 and skip_steps == 0) else 0
         if resume_step > 0:
             completed_steps += resume_step
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
@@ -1517,7 +1518,8 @@ def main() -> None:
 
             running += loss.item()
             global_step += 1
-            step_in_epoch = step
+            step_abs = step + resume_offset
+            step_in_epoch = step_abs
             completed_steps += 1
             steps_since_resume += 1
             epoch_steps_since_resume += 1
@@ -1533,7 +1535,7 @@ def main() -> None:
                 if use_tqdm:
                     tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 else:
-                    epoch_done = resume_step + step + 1
+                    epoch_done = step_abs + 1
                     remaining_epoch_steps = max(0, steps_this_epoch - epoch_done)
                     if len(epoch_time_window) >= 2:
                         epoch_span = epoch_time_window[-1] - epoch_time_window[0]
