@@ -1400,14 +1400,15 @@ def main() -> None:
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
         steps_this_epoch = steps_per_epoch
-        if epoch == start_epoch and skip_steps > 0:
-            completed_steps += skip_steps
+        resume_step = start_step_in_epoch if epoch == start_epoch else 0
+        if resume_step > 0:
+            completed_steps += resume_step
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
         epoch_bar = None
         if use_tqdm:
             epoch_bar = tqdm(
                 total=steps_this_epoch,
-                initial=skip_steps,
+                initial=resume_step,
                 desc=f"epoch {epoch+1}/{args.epochs}",
                 unit="step",
                 leave=True,
@@ -1509,8 +1510,9 @@ def main() -> None:
                 if use_tqdm:
                     tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 else:
+                    display_step = resume_step + step + 1
                     print(
-                        f"[epoch {epoch+1}] step {step+1}/{steps_this_epoch} "
+                        f"[epoch {epoch+1}] step {display_step}/{steps_this_epoch} "
                         f"loss {avg:.4f} overall={overall_pct:.1f}%"
                     )
                 running = 0.0
