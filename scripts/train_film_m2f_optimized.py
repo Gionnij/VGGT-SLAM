@@ -1363,7 +1363,7 @@ def main() -> None:
         return out_path
 
     total_steps = len(dl) * (args.epochs - start_epoch)
-    global_bar = tqdm(total=total_steps, desc="train", unit="step")
+    completed_steps = 0
     for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
@@ -1397,9 +1397,14 @@ def main() -> None:
             ds.reset_cache_stats()
         steps_this_epoch = max(0, len(dl) - skip_steps)
         if epoch == start_epoch and skip_steps > 0:
-            global_bar.update(skip_steps)
+            completed_steps += skip_steps
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
-        epoch_bar = tqdm(total=steps_this_epoch, desc=f"epoch {epoch+1}/{args.epochs}", unit="step", leave=False)
+        epoch_bar = tqdm(
+            total=steps_this_epoch,
+            desc=f"epoch {epoch+1}/{args.epochs}",
+            unit="step",
+            leave=True,
+        )
         for step, data in enumerate(data_iter):
             if step < skip_steps:
                 # Skip steps already completed before checkpoint.
@@ -1485,8 +1490,10 @@ def main() -> None:
             running += loss.item()
             global_step += 1
             step_in_epoch = step
-            global_bar.update(1)
+            completed_steps += 1
             epoch_bar.update(1)
+            overall_pct = 100.0 * completed_steps / max(1, total_steps)
+            epoch_bar.set_postfix_str(f"overall={overall_pct:.1f}%")
             if (step + 1) % 10 == 0:
                 avg = running / 10
                 tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
@@ -1515,7 +1522,6 @@ def main() -> None:
         last_save_time = time.time()
 
     print("Training finished.")
-    global_bar.close()
 
 
 if __name__ == "__main__":
