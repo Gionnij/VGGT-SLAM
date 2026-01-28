@@ -1299,6 +1299,7 @@ def main() -> None:
         return
 
     resume_sample_offset = 0
+    resume_step_in_epoch = start_step_in_epoch
     if start_step_in_epoch > 0:
         resume_sample_offset = start_step_in_epoch * int(args.batch_size)
 
@@ -1400,7 +1401,7 @@ def main() -> None:
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
         steps_this_epoch = steps_per_epoch
-        resume_step = start_step_in_epoch if epoch == start_epoch else 0
+        resume_step = resume_step_in_epoch if epoch == start_epoch else 0
         if resume_step > 0:
             completed_steps += resume_step
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
