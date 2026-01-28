@@ -18,7 +18,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import datetime
 import time
 import itertools
@@ -314,6 +314,15 @@ def _format_histogram(values: Sequence[int]) -> str:
             counts[v] += 1
     parts = [f"{i}:{counts[i]}" for i in range(1, max_val + 1)]
     return " ".join(parts)
+
+
+def _format_eta_minutes(minutes: float) -> str:
+    if minutes < 0:
+        minutes = 0
+    total = int(minutes + 0.5)
+    hours = total // 60
+    mins = total % 60
+    return f"{hours}h{mins:02d}m"
 
 
 def _chunk_order_from_samples(samples: Sequence[Dict]) -> List[str]:
@@ -1370,8 +1379,10 @@ def main() -> None:
     completed_steps = start_epoch * steps_per_epoch
     use_tqdm = sys.stderr.isatty()
     log_every = 50
+    eta_window = 1500
     train_start_time = time.perf_counter()
     steps_since_resume = 0
+    train_time_window: deque = deque(maxlen=eta_window)
     for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
@@ -1402,6 +1413,7 @@ def main() -> None:
         running = 0.0
         epoch_start_time = time.perf_counter()
         epoch_steps_since_resume = 0
+        epoch_time_window: deque = deque(maxlen=eta_window)
         diagnose_epoch = diagnose_active and epoch == start_epoch
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
@@ -1509,6 +1521,9 @@ def main() -> None:
             completed_steps += 1
             steps_since_resume += 1
             epoch_steps_since_resume += 1
+            now = time.perf_counter()
+            epoch_time_window.append(now)
+            train_time_window.append(now)
             overall_pct = 100.0 * completed_steps / max(1, total_steps)
             if epoch_bar is not None:
                 epoch_bar.update(1)
@@ -1518,17 +1533,29 @@ def main() -> None:
                 if use_tqdm:
                     tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 else:
-                    epoch_elapsed = time.perf_counter() - epoch_start_time
-                    train_elapsed = time.perf_counter() - train_start_time
                     epoch_done = resume_step + step + 1
-                    epoch_eta = epoch_elapsed / max(1, epoch_steps_since_resume) * max(0, steps_this_epoch - epoch_done)
+                    remaining_epoch_steps = max(0, steps_this_epoch - epoch_done)
+                    if len(epoch_time_window) >= 2:
+                        epoch_span = epoch_time_window[-1] - epoch_time_window[0]
+                        epoch_rate = (len(epoch_time_window) - 1) / max(1e-6, epoch_span)
+                        epoch_eta = remaining_epoch_steps / max(1e-6, epoch_rate)
+                    else:
+                        epoch_elapsed = time.perf_counter() - epoch_start_time
+                        epoch_eta = epoch_elapsed / max(1, epoch_steps_since_resume) * remaining_epoch_steps
                     remaining_steps = max(0, total_steps - completed_steps)
-                    train_eta = train_elapsed / max(1, steps_since_resume) * remaining_steps
+                    if len(train_time_window) >= 2:
+                        train_span = train_time_window[-1] - train_time_window[0]
+                        train_rate = (len(train_time_window) - 1) / max(1e-6, train_span)
+                        train_eta = remaining_steps / max(1e-6, train_rate)
+                    else:
+                        train_elapsed = time.perf_counter() - train_start_time
+                        train_eta = train_elapsed / max(1, steps_since_resume) * remaining_steps
                     display_step = epoch_done
                     print(
                         f"[epoch {epoch+1}] step {display_step}/{steps_this_epoch} "
                         f"loss {avg:.4f} overall={overall_pct:.1f}% "
-                        f"epoch_eta={epoch_eta/60:.1f}m train_eta={train_eta/60:.1f}m"
+                        f"epoch_eta={_format_eta_minutes(epoch_eta / 60.0)} "
+                        f"train_eta={_format_eta_minutes(train_eta / 60.0)}"
                     )
                 running = 0.0
 
