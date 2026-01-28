@@ -1371,6 +1371,7 @@ def main() -> None:
     use_tqdm = sys.stderr.isatty()
     log_every = 50
     train_start_time = time.perf_counter()
+    steps_since_resume = 0
     for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
@@ -1400,6 +1401,7 @@ def main() -> None:
         step_in_epoch = -1
         running = 0.0
         epoch_start_time = time.perf_counter()
+        epoch_steps_since_resume = 0
         diagnose_epoch = diagnose_active and epoch == start_epoch
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
@@ -1505,6 +1507,8 @@ def main() -> None:
             global_step += 1
             step_in_epoch = step
             completed_steps += 1
+            steps_since_resume += 1
+            epoch_steps_since_resume += 1
             overall_pct = 100.0 * completed_steps / max(1, total_steps)
             if epoch_bar is not None:
                 epoch_bar.update(1)
@@ -1517,9 +1521,10 @@ def main() -> None:
                     epoch_elapsed = time.perf_counter() - epoch_start_time
                     train_elapsed = time.perf_counter() - train_start_time
                     epoch_done = resume_step + step + 1
-                    epoch_eta = epoch_elapsed / max(1, epoch_done) * max(0, steps_this_epoch - epoch_done)
-                    train_eta = train_elapsed / max(1, completed_steps) * max(0, total_steps - completed_steps)
-                    display_step = resume_step + step + 1
+                    epoch_eta = epoch_elapsed / max(1, epoch_steps_since_resume) * max(0, steps_this_epoch - epoch_done)
+                    remaining_steps = max(0, total_steps - completed_steps)
+                    train_eta = train_elapsed / max(1, steps_since_resume) * remaining_steps
+                    display_step = epoch_done
                     print(
                         f"[epoch {epoch+1}] step {display_step}/{steps_this_epoch} "
                         f"loss {avg:.4f} overall={overall_pct:.1f}% "

@@ -129,13 +129,29 @@ PY
 CMD=("$TRAIN_PYTHON" -u scripts/train_film_m2f_optimized.py \
   --dataset-root "$DATASET_ROOT" \
   --run-dir "$RUN_DIR" \
-  --ckpt-dir "$RUN_DIR/checkpoints" \
-  --resume auto)
+  --ckpt-dir "$RUN_DIR/checkpoints")
 
-if [ -n "$LABELS_ROOT" ]; then
+labels_present=0
+for arg in "${EXTRA_ARGS[@]}"; do
+  if [ "$arg" = "--labels-root" ]; then
+    labels_present=1
+    break
+  fi
+done
+if [ -n "$LABELS_ROOT" ] && [ "$labels_present" -eq 0 ]; then
   CMD+=(--labels-root "$LABELS_ROOT")
 fi
 
+resume_present=0
+for arg in "${EXTRA_ARGS[@]}"; do
+  if [ "$arg" = "--resume" ]; then
+    resume_present=1
+    break
+  fi
+done
+if [ "$resume_present" -eq 0 ]; then
+  CMD+=(--resume auto)
+fi
 if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
