@@ -24,6 +24,8 @@ import time
 import itertools
 import os
 import statistics
+import math
+import sys
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 try:
@@ -1362,8 +1364,10 @@ def main() -> None:
         print(f"[checkpoint] saved ({reason}) -> {out_path}")
         return out_path
 
-    total_steps = len(dl) * (args.epochs - start_epoch)
-    completed_steps = 0
+    steps_per_epoch = math.ceil(len(ds) / max(1, int(args.batch_size)))
+    total_steps = steps_per_epoch * args.epochs
+    completed_steps = start_epoch * steps_per_epoch
+    use_tqdm = sys.stderr.isatty()
     for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
@@ -1395,16 +1399,21 @@ def main() -> None:
         diagnose_epoch = diagnose_active and epoch == start_epoch
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
-        steps_this_epoch = max(0, len(dl) - skip_steps)
+        steps_this_epoch = steps_per_epoch
         if epoch == start_epoch and skip_steps > 0:
             completed_steps += skip_steps
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
-        epoch_bar = tqdm(
-            total=steps_this_epoch,
-            desc=f"epoch {epoch+1}/{args.epochs}",
-            unit="step",
-            leave=True,
-        )
+        epoch_bar = None
+        if use_tqdm:
+            epoch_bar = tqdm(
+                total=steps_this_epoch,
+                initial=skip_steps,
+                desc=f"epoch {epoch+1}/{args.epochs}",
+                unit="step",
+                leave=True,
+                position=0,
+                dynamic_ncols=True,
+            )
         for step, data in enumerate(data_iter):
             if step < skip_steps:
                 # Skip steps already completed before checkpoint.
@@ -1491,12 +1500,19 @@ def main() -> None:
             global_step += 1
             step_in_epoch = step
             completed_steps += 1
-            epoch_bar.update(1)
             overall_pct = 100.0 * completed_steps / max(1, total_steps)
-            epoch_bar.set_postfix_str(f"overall={overall_pct:.1f}%")
+            if epoch_bar is not None:
+                epoch_bar.update(1)
+                epoch_bar.set_postfix_str(f"overall={overall_pct:.1f}%")
             if (step + 1) % 10 == 0:
                 avg = running / 10
-                tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
+                if use_tqdm:
+                    tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
+                else:
+                    print(
+                        f"[epoch {epoch+1}] step {step+1}/{steps_this_epoch} "
+                        f"loss {avg:.4f} overall={overall_pct:.1f}%"
+                    )
                 running = 0.0
 
             if args.save_every_minutes > 0:
@@ -1515,7 +1531,8 @@ def main() -> None:
         if diagnose_epoch:
             _print_diag_summary()
             diagnose_active = False
-        epoch_bar.close()
+        if epoch_bar is not None:
+            epoch_bar.close()
 
         # End-of-epoch checkpoint
         save_checkpoint(epoch, step_in_epoch, reason="epoch_end")
