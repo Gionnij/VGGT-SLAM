@@ -1369,6 +1369,8 @@ def main() -> None:
     total_steps = steps_per_epoch * args.epochs
     completed_steps = start_epoch * steps_per_epoch
     use_tqdm = sys.stderr.isatty()
+    log_every = 50
+    train_start_time = time.perf_counter()
     for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
@@ -1397,6 +1399,7 @@ def main() -> None:
         last_prefetched: Optional[str] = None
         step_in_epoch = -1
         running = 0.0
+        epoch_start_time = time.perf_counter()
         diagnose_epoch = diagnose_active and epoch == start_epoch
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
@@ -1506,15 +1509,21 @@ def main() -> None:
             if epoch_bar is not None:
                 epoch_bar.update(1)
                 epoch_bar.set_postfix_str(f"overall={overall_pct:.1f}%")
-            if (step + 1) % 10 == 0:
-                avg = running / 10
+            if (step + 1) % log_every == 0:
+                avg = running / log_every
                 if use_tqdm:
                     tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
                 else:
+                    epoch_elapsed = time.perf_counter() - epoch_start_time
+                    train_elapsed = time.perf_counter() - train_start_time
+                    epoch_done = resume_step + step + 1
+                    epoch_eta = epoch_elapsed / max(1, epoch_done) * max(0, steps_this_epoch - epoch_done)
+                    train_eta = train_elapsed / max(1, completed_steps) * max(0, total_steps - completed_steps)
                     display_step = resume_step + step + 1
                     print(
                         f"[epoch {epoch+1}] step {display_step}/{steps_this_epoch} "
-                        f"loss {avg:.4f} overall={overall_pct:.1f}%"
+                        f"loss {avg:.4f} overall={overall_pct:.1f}% "
+                        f"epoch_eta={epoch_eta/60:.1f}m train_eta={train_eta/60:.1f}m"
                     )
                 running = 0.0
 
