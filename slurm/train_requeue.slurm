@@ -56,7 +56,17 @@ export PYTHONNOUSERSITE=1
 # Skip dataset registration to avoid noisy warnings when importing mask2former.
 export MASK2FORMER_SKIP_DATA=1
 
-RUN_DIR="${RUN_DIR:-"$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"}"
+RUN_DIR_FILE="${RUN_DIR_FILE:-"${SLURM_SUBMIT_DIR:-$PWD}/.run_dir_${SLURM_JOB_ID:-manual}.txt"}"
+if [ -n "${RUN_DIR:-}" ]; then
+  mkdir -p "$(dirname "$RUN_DIR_FILE")"
+  echo "$RUN_DIR" > "$RUN_DIR_FILE"
+elif [ -f "$RUN_DIR_FILE" ]; then
+  RUN_DIR="$(cat "$RUN_DIR_FILE")"
+else
+  RUN_DIR="$PWD/runs/film_m2f_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"
+  mkdir -p "$(dirname "$RUN_DIR_FILE")"
+  echo "$RUN_DIR" > "$RUN_DIR_FILE"
+fi
 DATASET_ROOT="${DATASET_ROOT:?Set DATASET_ROOT to your packed dataset root (with chunks/labels).}"
 LABELS_ROOT="${LABELS_ROOT:-}"
 EXTRA_ARGS=("$@")
@@ -70,11 +80,39 @@ LOG_PATH="$RUN_DIR/logs/train_${SLURM_JOB_ID:-manual}.log"
 touch "$LOG_PATH"
 exec > >(tee -a "$LOG_PATH") 2>&1
 
+requeue_job() {
+  local reason="$1"
+  local delay="${REQUEUE_DELAY_SEC:-90}"
+  if [ -z "${SLURM_JOB_ID:-}" ]; then
+    echo "[signal] SLURM_JOB_ID missing; cannot requeue." | tee -a "$LOG_PATH"
+    return
+  fi
+  if ! command -v scontrol >/dev/null 2>&1; then
+    echo "[signal] scontrol not found; cannot requeue." | tee -a "$LOG_PATH"
+    return
+  fi
+  echo "[signal] scheduling requeue in ${delay}s (reason=${reason})." | tee -a "$LOG_PATH"
+  (
+    sleep "$delay"
+    echo "[signal] requeueing job ${SLURM_JOB_ID} (reason=${reason})." | tee -a "$LOG_PATH"
+    scontrol requeue "${SLURM_JOB_ID}" || echo "[warn] scontrol requeue failed." | tee -a "$LOG_PATH"
+  ) &
+}
+
 on_usr1() {
   echo "[signal] USR1 received at $(date -Iseconds); requesting checkpoint." | tee -a "$LOG_PATH"
   touch "$RUN_DIR/REQUEST_SAVE"
+  requeue_job "USR1"
 }
+
+on_term() {
+  echo "[signal] TERM received at $(date -Iseconds); requesting checkpoint." | tee -a "$LOG_PATH"
+  touch "$RUN_DIR/REQUEST_SAVE"
+  requeue_job "TERM"
+}
+
 trap on_usr1 USR1
+trap on_term TERM
 
 echo "[env] RUN_DIR=$RUN_DIR"
 echo "[env] DATASET_ROOT=$DATASET_ROOT"
