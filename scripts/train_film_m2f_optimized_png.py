@@ -155,6 +155,18 @@ def parse_args() -> argparse.Namespace:
         help="Iterate M batches and report chunk locality without training (0 disables).",
     )
     p.add_argument(
+        "--debug-labels",
+        type=int,
+        default=0,
+        help="Print label stats for the first N steps (0 disables).",
+    )
+    p.add_argument(
+        "--debug-grads",
+        type=int,
+        default=0,
+        help="Print gradient norms for the first N steps (0 disables).",
+    )
+    p.add_argument(
         "--no-debug-print",
         action="store_true",
         help="Disable per-batch debug prints to reduce overhead.",
@@ -877,6 +889,32 @@ def focal_loss(
     return focal[valid].mean()
 
 
+def _summarize_labels(
+    labels: torch.Tensor,
+    *,
+    name: str,
+    ignore_index: int,
+    num_classes: int,
+) -> str:
+    total = labels.numel()
+    valid_mask = labels != ignore_index
+    valid = int(valid_mask.sum().item())
+    ignore = total - valid
+    if valid > 0:
+        valid_vals = labels[valid_mask]
+        min_val = int(valid_vals.min().item())
+        max_val = int(valid_vals.max().item())
+    else:
+        min_val = -1
+        max_val = -1
+    out_of_range = ((labels < 0) | (labels >= num_classes)) & valid_mask
+    oor = int(out_of_range.sum().item())
+    return (
+        f"{name}: total={total} valid={valid} ignore={ignore} "
+        f"min={min_val} max={max_val} oor={oor}"
+    )
+
+
 def _is_rank0() -> bool:
     if not torch.distributed.is_available():
         return True
@@ -1043,6 +1081,8 @@ def main() -> None:
     diag_step_times: List[float] = []
     diag_unique_counts: List[int] = []
     diag_summary_printed = False
+    debug_labels_left = max(0, int(args.debug_labels))
+    debug_grads_left = max(0, int(args.debug_grads))
 
     def _print_diag_summary() -> None:
         nonlocal diag_summary_printed
@@ -1180,6 +1220,36 @@ def main() -> None:
                 # Compute loss at the native mask resolution to save memory; downsample labels instead of upsampling logits.
                 target_size = seg_logits.shape[-2:]
                 label_down = F.interpolate(label_tensor.unsqueeze(1).float(), size=target_size, mode="nearest").squeeze(1).long()
+                if debug_labels_left > 0:
+                    msg_full = _summarize_labels(
+                        label_tensor,
+                        name="labels_full",
+                        ignore_index=args.ignore_index,
+                        num_classes=args.num_classes,
+                    )
+                    msg_down = _summarize_labels(
+                        label_down,
+                        name="labels_down",
+                        ignore_index=args.ignore_index,
+                        num_classes=args.num_classes,
+                    )
+                    print(
+                        f"[dbg] {msg_full} | {msg_down} "
+                        f"downsample_to={tuple(target_size)}"
+                    )
+                    debug_labels_left -= 1
+                # Map any out-of-range labels to ignore_index to avoid NLL loss device asserts.
+                invalid = (label_down != args.ignore_index) & (
+                    (label_down < 0) | (label_down >= args.num_classes)
+                )
+                if invalid.any():
+                    label_down = label_down.masked_fill(invalid, args.ignore_index)
+                    if not args.no_debug_print and step == 0 and epoch == 0:
+                        bad_count = int(invalid.sum().item())
+                        print(
+                            f"[warn] mapped {bad_count} labels outside [0,{args.num_classes - 1}] "
+                            f"to ignore_index={args.ignore_index}"
+                        )
             loss = focal_loss(
                 seg_logits,
                 label_down,
@@ -1189,6 +1259,21 @@ def main() -> None:
             )
 
             scaler.scale(loss).backward()
+            if debug_grads_left > 0:
+                if scaler.is_enabled():
+                    scaler.unscale_(optim)
+                fusion_w = model.fusion.mlps[0][0].weight
+                head_param = None
+                for p in model.sem_head.head.parameters():
+                    head_param = p
+                    break
+                fusion_norm = float(fusion_w.grad.norm().item()) if fusion_w.grad is not None else 0.0
+                head_norm = float(head_param.grad.norm().item()) if head_param is not None and head_param.grad is not None else 0.0
+                print(
+                    f"[dbg] grad_norm fusion={fusion_norm:.6f} head={head_norm:.6f} "
+                    f"loss={float(loss.item()):.4f}"
+                )
+                debug_grads_left -= 1
             scaler.step(optim)
             scaler.update()
             if diagnose_now:
