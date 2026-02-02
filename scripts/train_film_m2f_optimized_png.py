@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--focal-alpha", type=float, default=0.25, help="Alpha weighting for focal loss.")
     p.add_argument("--focal-gamma", type=float, default=2.0, help="Gamma exponent for focal loss.")
     p.add_argument(
+        "--loss-scale",
+        type=float,
+        default=1.0,
+        help="Optional scalar to multiply the loss (useful for tiny gradients).",
+    )
+    p.add_argument(
         "--scenes-file",
         help="Optional text file with scene ids (one per line) to train on. Overrides --scenes if provided.",
     )
@@ -1257,6 +1263,8 @@ def main() -> None:
                 alpha=args.focal_alpha,
                 gamma=args.focal_gamma,
             )
+            if args.loss_scale != 1.0:
+                loss = loss * float(args.loss_scale)
 
             scaler.scale(loss).backward()
             if debug_grads_left > 0:
