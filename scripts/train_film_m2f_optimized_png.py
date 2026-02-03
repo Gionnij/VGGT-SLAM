@@ -77,6 +77,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-chunks", type=int, default=None, help="Optional cap on chunks for quick tests.")
     p.add_argument("--num-classes", type=int, default=200, help="Number of semantic classes.")
     p.add_argument("--ignore-index", type=int, default=65535, help="Label value to ignore in loss.")
+    p.add_argument(
+        "--ignore-classes",
+        help="Comma-separated list of class ids to remap to ignore-index before training.",
+    )
+    p.add_argument(
+        "--ignore-classes-file",
+        help="Text file with one class id per line to ignore.",
+    )
+    p.add_argument(
+        "--remap-classes-file",
+        help=(
+            "Optional text file with one original class id per line. "
+            "Masks are remapped to a dense id space [0..K-1] using this list; "
+            "values not in the list are set to ignore-index. "
+            "num-classes defaults to len(list) when provided."
+        ),
+    )
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
     p.add_argument("--weights-path", help="Optional Detectron2-style Mask2Former checkpoint to init from.")
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
@@ -500,6 +517,18 @@ def _load_list_from_file(path_str: Optional[str]) -> Optional[List[str]]:
     return out or None
 
 
+def _parse_ignore_classes(arg: Optional[str]) -> Set[int]:
+    ignore: Set[int] = set()
+    if not arg:
+        return ignore
+    for item in arg.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        ignore.add(int(item))
+    return ignore
+
+
 class ChunkDataset(Dataset):
     """
     Streams per-frame samples from exported chunks, deduplicating overlaps.
@@ -510,12 +539,18 @@ class ChunkDataset(Dataset):
         self,
         samples: Sequence[Dict],
         *,
+        ignore_classes: Optional[Sequence[int]] = None,
+        ignore_value: Optional[int] = None,
+        remap_dict: Optional[Dict[int, int]] = None,
         labels_root: Optional[Path] = None,
         cache_size: int = 2,
         label_cache_size: int = 0,
         prefetch_next_chunk: bool = False,
     ) -> None:
         self.samples: List[Dict] = list(samples)
+        self.ignore_classes: Set[int] = set(ignore_classes or [])
+        self.ignore_value = ignore_value
+        self.remap_dict = remap_dict or {}
         self.labels_root = labels_root
         self.cache_size = max(1, cache_size)
         self._cache: OrderedDict[Path, Dict] = OrderedDict()
@@ -534,6 +569,21 @@ class ChunkDataset(Dataset):
         self._label_cache_hits = 0
         self._label_cache_misses = 0
 
+        # Fast label remap via LUT (vectorized). This avoids Python loops per sample.
+        # We keep a reasonably sized LUT for 16-bit label PNGs.
+        lut_size = 65536
+        self._lut = torch.arange(lut_size, dtype=torch.long)
+        if self.ignore_value is not None and self.ignore_classes:
+            for cls in self.ignore_classes:
+                if 0 <= cls < lut_size:
+                    self._lut[cls] = int(self.ignore_value)
+        if self.remap_dict and self.ignore_value is not None:
+            # Default all to ignore, then set known ids.
+            self._lut.fill_(int(self.ignore_value))
+            for orig, new in self.remap_dict.items():
+                if 0 <= orig < lut_size:
+                    self._lut[orig] = int(new)
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -541,6 +591,10 @@ class ChunkDataset(Dataset):
         sample = self.samples[idx]
         label_path = Path(sample["label_path"])
         label = self._get_label(label_path)
+        # Vectorized remap/ignore.
+        if self._lut is not None:
+            # Clamp for safety in case of unexpected values.
+            label = self._lut[label.clamp(0, self._lut.numel() - 1)]
         chk = self._get_chunk(sample["chunk_path"])
         dino = chk["dino_features"][0, sample["frame_idx"]]
         dpt_levels = [lvl[0, sample["frame_idx"]] for lvl in chk["dpt_pyramid"]]
@@ -1022,6 +1076,25 @@ def main() -> None:
     scenes_cli = [s.strip() for s in args.scenes.split(",")] if args.scenes else None
     scenes = scenes_from_file or scenes_cli
 
+    ignore_classes = _parse_ignore_classes(args.ignore_classes)
+    ignore_from_file = _load_list_from_file(args.ignore_classes_file)
+    if ignore_from_file:
+        ignore_classes.update(int(s) for s in ignore_from_file)
+    if ignore_classes:
+        print(f"[info] remapping {len(ignore_classes)} classes to ignore_index={args.ignore_index}")
+
+    remap_classes = _load_list_from_file(args.remap_classes_file)
+    remap_dict: Dict[int, int] = {}
+    if remap_classes:
+        remap_classes = [int(x) for x in remap_classes]
+        remap_classes = sorted(set(remap_classes))
+        remap_dict = {orig: new for new, orig in enumerate(remap_classes)}
+        if args.num_classes == 200:  # default value implies not set explicitly
+            args.num_classes = len(remap_classes)
+            print(f"[info] remap_classes_file provided; setting num_classes={args.num_classes}")
+        else:
+            print(f"[info] remap_classes_file provided; keeping user num_classes={args.num_classes}")
+
     chunk_files = list_chunk_files(dataset_root, scenes=scenes, chunk_format=args.chunk_format)
     if args.max_chunks:
         chunk_files = chunk_files[: args.max_chunks]
@@ -1034,6 +1107,9 @@ def main() -> None:
 
     ds = ChunkDataset(
         samples,
+        ignore_classes=sorted(ignore_classes),
+        ignore_value=args.ignore_index,
+        remap_dict=remap_dict,
         labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
         cache_size=max(1, args.chunk_cache_size),
         label_cache_size=args.label_cache_size,
