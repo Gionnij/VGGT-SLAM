@@ -191,6 +191,19 @@ def evaluate_checkpoint(
                         export_dir.mkdir(parents=True, exist_ok=True)
                         gt_img.save(export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_gt.png")
                         pred_img.save(export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_pred.png")
+                        if export_dir and export_dir.is_dir() and export_masks and args.export_raw:
+                            # Save raw label ids as uint16 PNGs for exact inspection.
+                            import numpy as np
+                            from PIL import Image
+
+                            gt_raw = gt_mask.cpu().numpy().astype(np.uint16)
+                            pred_raw = pred_mask.cpu().numpy().astype(np.uint16)
+                            Image.fromarray(gt_raw, mode="I;16").save(
+                                export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_gt_id.png"
+                            )
+                            Image.fromarray(pred_raw, mode="I;16").save(
+                                export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_pred_id.png"
+                            )
                         seen_exports.add(sample_idx)
                     sample_idx += 1
                 continue
@@ -246,6 +259,11 @@ def main() -> None:
     ap.add_argument("--max-checkpoints", type=int, default=0, help="0 = no limit")
     ap.add_argument("--out-json", type=Path)
     ap.add_argument("--export-masks", action="store_true", help="Export 4 GT/pred masks for visual inspection.")
+    ap.add_argument(
+        "--export-raw",
+        action="store_true",
+        help="Also export raw label-id masks (uint16 PNG) alongside colorized masks.",
+    )
     ap.add_argument("--export-dir", type=Path, default=Path("eval_masks"))
     args = ap.parse_args()
 
