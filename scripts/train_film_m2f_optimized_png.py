@@ -209,6 +209,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable per-batch debug prints to reduce overhead.",
     )
     p.add_argument(
+        "--log-every",
+        type=int,
+        default=50,
+        help="Log loss/grad stats every N steps.",
+    )
+    p.add_argument(
         "--run-dir",
         default="./runs/film_m2f",
         help="Run directory for checkpoints/logs (checkpoints are written to <run-dir>/checkpoints).",
@@ -1264,7 +1270,7 @@ def main() -> None:
     total_steps = steps_per_epoch * args.epochs
     completed_steps = 0
     use_tqdm = sys.stderr.isatty()
-    log_every = 50
+    log_every = max(1, int(args.log_every))
     eta_window = 1500
     train_start_time = time.perf_counter()
     steps_done = 0
