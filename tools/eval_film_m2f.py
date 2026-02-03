@@ -117,6 +117,7 @@ def evaluate_checkpoint(
     focal_alpha: float,
     focal_gamma: float,
     export_masks: bool,
+    export_raw: bool,
     export_indices: Sequence[int],
     export_dir: Path,
 ) -> Dict[str, float]:
@@ -191,7 +192,7 @@ def evaluate_checkpoint(
                         export_dir.mkdir(parents=True, exist_ok=True)
                         gt_img.save(export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_gt.png")
                         pred_img.save(export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_pred.png")
-                        if export_dir and export_dir.is_dir() and export_masks and args.export_raw:
+                        if export_dir and export_dir.is_dir() and export_masks and export_raw:
                             # Save raw label ids as uint16 PNGs for exact inspection.
                             import numpy as np
                             from PIL import Image
@@ -371,6 +372,7 @@ def main() -> None:
             focal_alpha=args.focal_alpha,
             focal_gamma=args.focal_gamma,
             export_masks=args.export_masks,
+            export_raw=args.export_raw,
             export_indices=export_indices,
             export_dir=export_dir,
         )
