@@ -87,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional scalar to multiply the loss (useful for tiny gradients).",
     )
     p.add_argument(
+        "--loss-reduction",
+        choices=["mean", "sum", "batch"],
+        default="mean",
+        help="How to reduce per-pixel loss: mean, sum, or sum divided by batch size.",
+    )
+    p.add_argument(
         "--scenes-file",
         help="Optional text file with scene ids (one per line) to train on. Overrides --scenes if provided.",
     )
@@ -883,6 +889,8 @@ def focal_loss(
     ignore_index: int,
     alpha: float,
     gamma: float,
+    reduction: str = "mean",
+    batch_size: Optional[int] = None,
 ) -> torch.Tensor:
     ce = F.cross_entropy(logits, targets, reduction="none", ignore_index=ignore_index)
     valid = targets != ignore_index
@@ -892,6 +900,11 @@ def focal_loss(
     focal = ((1 - pt) ** gamma) * ce
     if alpha is not None and alpha > 0:
         focal = alpha * focal
+    if reduction == "sum":
+        return focal[valid].sum()
+    if reduction == "batch":
+        denom = max(1, int(batch_size or 0))
+        return focal[valid].sum() / float(denom)
     return focal[valid].mean()
 
 
@@ -1262,14 +1275,18 @@ def main() -> None:
                 ignore_index=args.ignore_index,
                 alpha=args.focal_alpha,
                 gamma=args.focal_gamma,
+                reduction=args.loss_reduction,
+                batch_size=label_down.shape[0],
             )
             if args.loss_scale != 1.0:
                 loss = loss * float(args.loss_scale)
 
             scaler.scale(loss).backward()
+            unscaled = False
             if debug_grads_left > 0:
                 if scaler.is_enabled():
                     scaler.unscale_(optim)
+                    unscaled = True
                 fusion_w = model.fusion.mlps[0][0].weight
                 head_param = None
                 for p in model.sem_head.head.parameters():
@@ -1332,8 +1349,20 @@ def main() -> None:
                 epoch_bar.set_postfix_str(f"overall={overall_pct:.1f}%")
             if (step + 1) % log_every == 0:
                 avg = running / log_every
+                grad_msg = ""
+                if scaler.is_enabled() and not unscaled:
+                    scaler.unscale_(optim)
+                    unscaled = True
+                fusion_w = model.fusion.mlps[0][0].weight
+                head_param = None
+                for p in model.sem_head.head.parameters():
+                    head_param = p
+                    break
+                fusion_norm = float(fusion_w.grad.norm().item()) if fusion_w.grad is not None else 0.0
+                head_norm = float(head_param.grad.norm().item()) if head_param is not None and head_param.grad is not None else 0.0
+                grad_msg = f" grad_norm fusion={fusion_norm:.2e} head={head_norm:.2e}"
                 if use_tqdm:
-                    tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}")
+                    tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}{grad_msg}")
                 else:
                     epoch_done = step + 1
                     remaining_epoch_steps = max(0, steps_this_epoch - epoch_done)
