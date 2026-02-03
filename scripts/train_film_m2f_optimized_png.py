@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--lr-fusion", type=float, default=None, help="Optional LR override for FiLM fusion params.")
+    p.add_argument("--lr-head", type=float, default=None, help="Optional LR override for Mask2Former head params.")
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--max-chunks", type=int, default=None, help="Optional cap on chunks for quick tests.")
     p.add_argument("--num-classes", type=int, default=200, help="Number of semantic classes.")
@@ -91,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         choices=["mean", "sum", "batch"],
         default="mean",
         help="How to reduce per-pixel loss: mean, sum, or sum divided by batch size.",
+    )
+    p.add_argument(
+        "--freeze-head-epochs",
+        type=int,
+        default=0,
+        help="Freeze Mask2Former head for the first N epochs (LR=0, grads off).",
     )
     p.add_argument(
         "--scenes-file",
@@ -1071,14 +1079,33 @@ def main() -> None:
     )
     model.train()
 
-    # Train FiLM + Mask2Former head
-    trainable = [p for p in model.parameters() if p.requires_grad]
-    optim = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
+    # Train FiLM + Mask2Former head (optionally with separate LRs).
+    fusion_params = list(model.fusion.parameters())
+    head_params = list(model.sem_head.parameters())
+    fusion_lr = float(args.lr_fusion) if args.lr_fusion is not None else float(args.lr)
+    head_lr = float(args.lr_head) if args.lr_head is not None else float(args.lr)
+    optim = torch.optim.AdamW(
+        [
+            {"params": fusion_params, "lr": fusion_lr},
+            {"params": head_params, "lr": head_lr},
+        ],
+        weight_decay=args.weight_decay,
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=args.use_half and device.type == "cuda")
+    head_frozen = False
+    head_lr_active = head_lr
+    if int(args.freeze_head_epochs) > 0:
+        for p in head_params:
+            p.requires_grad = False
+        head_frozen = True
+        head_lr_active = 0.0
+        optim.param_groups[1]["lr"] = head_lr_active
+        print(f"[info] freezing head for {int(args.freeze_head_epochs)} epochs (head lr=0)")
 
     # ############ DEBUG: count how many trainable params we actually update ############
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[dbg] trainable parameters: {num_params}")
+    print(f"[info] lr fusion={fusion_lr:g} head={head_lr:g}")
     # ############ END DEBUG ###########################################################
     print(f"[info] dataset samples: {len(ds)} from {len(chunk_files)} chunks")
 
@@ -1171,6 +1198,13 @@ def main() -> None:
         if isinstance(sampler, ChunkShuffleSampler):
             sampler.set_epoch(epoch)
             sampler.set_start_offset(0)
+        if head_frozen and epoch >= int(args.freeze_head_epochs):
+            for p in head_params:
+                p.requires_grad = True
+            head_frozen = False
+            head_lr_active = head_lr
+            optim.param_groups[1]["lr"] = head_lr_active
+            print(f"[info] unfreezing head at epoch {epoch+1} (head lr={head_lr_active:g})")
         next_chunk_map: Optional[Dict[str, str]] = None
         if prefetch_next_chunk and args.num_workers == 0:
             chunk_order: Optional[List[str]] = None
