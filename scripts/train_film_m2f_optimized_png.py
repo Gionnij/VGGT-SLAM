@@ -244,6 +244,20 @@ def parse_args() -> argparse.Namespace:
         help="Print mask logits stats for the first N steps (0 disables).",
     )
     p.add_argument(
+        "--mask-logit-temp",
+        type=float,
+        default=1.0,
+        help="Divide mask logits by this temperature before loss (1.0 disables).",
+    )
+    p.add_argument(
+        "--mask-logit-clamp",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Clamp mask logits to [MIN, MAX] before loss (disabled if unset).",
+    )
+    p.add_argument(
         "--no-debug-print",
         action="store_true",
         help="Disable per-batch debug prints to reduce overhead.",
@@ -1138,6 +1152,13 @@ def main() -> None:
     args = parse_args()
     if args.suppress_warnings:
         warnings.filterwarnings("ignore")
+    if args.mask_logit_temp <= 0:
+        raise ValueError("--mask-logit-temp must be > 0")
+    if args.mask_logit_clamp is not None:
+        lo, hi = args.mask_logit_clamp
+        if lo > hi:
+            lo, hi = hi, lo
+        args.mask_logit_clamp = (lo, hi)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset_root = Path(args.dataset_root).expanduser()
     if args.num_workers_auto or args.num_workers is None:
@@ -1495,6 +1516,11 @@ def main() -> None:
             optim.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.use_half and device.type == "cuda"):
                 cls_logits, mask_logits = model(dino, dpt_levels, label_shape=(H, W))
+                if args.mask_logit_temp != 1.0:
+                    mask_logits = mask_logits / float(args.mask_logit_temp)
+                if args.mask_logit_clamp is not None:
+                    lo, hi = args.mask_logit_clamp
+                    mask_logits = mask_logits.clamp(min=lo, max=hi)
                 S_frames = cls_logits.shape[1] if cls_logits.dim() == 4 else 1
                 if args.loss_input == "loglse":
                     seg_logits = dense_logprobs_from_queries(
