@@ -74,6 +74,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--lr-fusion", type=float, default=None, help="Optional LR override for FiLM fusion params.")
     p.add_argument("--lr-head", type=float, default=None, help="Optional LR override for Mask2Former head params.")
+    p.add_argument(
+        "--init-fusion-from",
+        help="Optional checkpoint path to initialize FiLM fusion weights from (e.g., a known-good run).",
+    )
+    p.add_argument(
+        "--freeze-fusion",
+        action="store_true",
+        help="Freeze FiLM fusion parameters (no grads, lr=0).",
+    )
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--max-chunks", type=int, default=None, help="Optional cap on chunks for quick tests.")
     p.add_argument("--num-classes", type=int, default=200, help="Number of semantic classes.")
@@ -551,6 +560,27 @@ def _parse_ignore_classes(arg: Optional[str]) -> Set[int]:
             continue
         ignore.add(int(item))
     return ignore
+
+
+def _load_fusion_state(path_str: str, device: torch.device) -> Dict[str, torch.Tensor]:
+    ckpt_path = Path(path_str).expanduser()
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(f"Fusion init checkpoint not found: {ckpt_path}")
+    state = torch.load(ckpt_path, map_location=device)
+    model_state = state.get("model_state") if isinstance(state, dict) else None
+    if model_state is None and isinstance(state, dict):
+        model_state = state
+    if model_state is None or not isinstance(model_state, dict):
+        raise RuntimeError(f"Unexpected checkpoint format for fusion init: {ckpt_path}")
+    fusion_state = {}
+    for k, v in model_state.items():
+        if k.startswith("fusion."):
+            fusion_state[k.replace("fusion.", "", 1)] = v
+        elif k.startswith("mlps."):
+            fusion_state[k] = v
+    if not fusion_state:
+        raise RuntimeError(f"No fusion weights found in checkpoint: {ckpt_path}")
+    return fusion_state
 
 
 class ChunkDataset(Dataset):
@@ -1197,8 +1227,22 @@ def main() -> None:
     # Train FiLM + Mask2Former head (optionally with separate LRs).
     fusion_params = list(model.fusion.parameters())
     head_params = list(model.sem_head.parameters())
+    if args.init_fusion_from:
+        fusion_state = _load_fusion_state(args.init_fusion_from, device=device)
+        missing, unexpected = model.fusion.load_state_dict(fusion_state, strict=False)
+        if missing:
+            print(f"[info] fusion init missing keys: {missing}")
+        if unexpected:
+            print(f"[info] fusion init unexpected keys: {unexpected}")
+        print(f"[info] initialized fusion from {args.init_fusion_from}")
+    if args.freeze_fusion:
+        for p in fusion_params:
+            p.requires_grad = False
+        print("[info] freezing fusion parameters (lr=0)")
     fusion_lr = float(args.lr_fusion) if args.lr_fusion is not None else float(args.lr)
     head_lr = float(args.lr_head) if args.lr_head is not None else float(args.lr)
+    if args.freeze_fusion:
+        fusion_lr = 0.0
     optim = torch.optim.AdamW(
         [
             {"params": fusion_params, "lr": fusion_lr},
