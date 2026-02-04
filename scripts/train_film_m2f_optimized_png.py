@@ -226,6 +226,24 @@ def parse_args() -> argparse.Namespace:
         help="Print raw vs remapped label stats for the first N steps (0 disables).",
     )
     p.add_argument(
+        "--debug-probs",
+        type=int,
+        default=0,
+        help="Print log-prob normalization stats for the first N steps (0 disables).",
+    )
+    p.add_argument(
+        "--debug-preds",
+        type=int,
+        default=0,
+        help="Print top-k predicted/label class histograms for the first N steps (0 disables).",
+    )
+    p.add_argument(
+        "--debug-masks",
+        type=int,
+        default=0,
+        help="Print mask logits stats for the first N steps (0 disables).",
+    )
+    p.add_argument(
         "--no-debug-print",
         action="store_true",
         help="Disable per-batch debug prints to reduce overhead.",
@@ -1318,6 +1336,9 @@ def main() -> None:
     debug_labels_left = max(0, int(args.debug_labels))
     debug_grads_left = max(0, int(args.debug_grads))
     debug_remap_left = max(0, int(args.debug_remap))
+    debug_probs_left = max(0, int(args.debug_probs))
+    debug_preds_left = max(0, int(args.debug_preds))
+    debug_masks_left = max(0, int(args.debug_masks))
 
     def _print_diag_summary() -> None:
         nonlocal diag_summary_printed
@@ -1522,6 +1543,65 @@ def main() -> None:
                 if args.loss_input != "probs":
                     # Treat seg_logits as unnormalized scores; convert to log-probabilities.
                     seg_loss_input = F.log_softmax(seg_logits, dim=1)
+
+                logp_debug = None
+                if debug_probs_left > 0:
+                    if args.loss_input == "probs":
+                        logp_debug = F.log_softmax(seg_logits.float(), dim=1)
+                    else:
+                        logp_debug = seg_loss_input.float()
+                    prob_sum = logp_debug.exp().sum(dim=1)
+                    print(
+                        "[dbg] logp stats "
+                        f"logp_min={logp_debug.min().item():.3f} "
+                        f"logp_max={logp_debug.max().item():.3f} "
+                        f"sum_min={prob_sum.min().item():.3f} "
+                        f"sum_mean={prob_sum.mean().item():.3f} "
+                        f"sum_max={prob_sum.max().item():.3f}"
+                    )
+                    debug_probs_left -= 1
+
+                if debug_preds_left > 0:
+                    if logp_debug is None:
+                        if args.loss_input == "probs":
+                            logp_debug = F.log_softmax(seg_logits.float(), dim=1)
+                        else:
+                            logp_debug = seg_loss_input.float()
+                    pred = logp_debug.argmax(dim=1)
+                    pred_counts = torch.bincount(
+                        pred.reshape(-1).cpu(), minlength=args.num_classes
+                    )
+                    valid_mask = label_down != args.ignore_index
+                    if valid_mask.any():
+                        label_counts = torch.bincount(
+                            label_down[valid_mask].reshape(-1).cpu(),
+                            minlength=args.num_classes,
+                        )
+                    else:
+                        label_counts = torch.zeros(args.num_classes, dtype=torch.long)
+                    pred_unique = int((pred_counts > 0).sum().item())
+                    label_unique = int((label_counts > 0).sum().item())
+                    pred_top = torch.topk(pred_counts, k=min(5, args.num_classes))
+                    label_top = torch.topk(label_counts, k=min(5, args.num_classes))
+                    pred_top_pairs = list(zip(pred_top.indices.tolist(), pred_top.values.tolist()))
+                    label_top_pairs = list(zip(label_top.indices.tolist(), label_top.values.tolist()))
+                    print(
+                        "[dbg] preds "
+                        f"pred_unique={pred_unique} label_unique={label_unique} "
+                        f"pred_top5={pred_top_pairs} label_top5={label_top_pairs}"
+                    )
+                    debug_preds_left -= 1
+
+                if debug_masks_left > 0:
+                    mask_stats = mask_logits.float()
+                    print(
+                        "[dbg] mask_logits stats "
+                        f"min={mask_stats.min().item():.3f} "
+                        f"max={mask_stats.max().item():.3f} "
+                        f"mean={mask_stats.mean().item():.3f} "
+                        f"std={mask_stats.std(unbiased=False).item():.3f}"
+                    )
+                    debug_masks_left -= 1
             loss = focal_loss(
                 seg_loss_input,
                 label_down,
