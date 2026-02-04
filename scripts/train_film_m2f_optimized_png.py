@@ -111,9 +111,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--focal-gamma", type=float, default=2.0, help="Gamma exponent for focal loss.")
     p.add_argument(
         "--loss-input",
-        choices=["probs", "logprobs"],
+        choices=["probs", "logprobs", "loglse"],
         default="probs",
-        help="Interpret seg scores as probs (legacy) or logprobs for loss computation.",
+        help="Interpret seg scores as probs (legacy), logprobs, or logprobs via logsumexp over queries.",
     )
     p.add_argument(
         "--loss-scale",
@@ -856,6 +856,35 @@ def dense_logits_from_queries(cls_logits: torch.Tensor, mask_logits: torch.Tenso
     return seg_flat
 
 
+def dense_logprobs_from_queries(
+    cls_logits: torch.Tensor, mask_logits: torch.Tensor, B: int, S: int
+) -> torch.Tensor:
+    """
+    Compute per-class log-probabilities from query logits using logsumexp over queries.
+    Returns [B,S,C,H,W] or [B,C,H,W] depending on inputs.
+    """
+    if cls_logits.dim() == 4:
+        cls_flat = cls_logits.reshape(B * S, *cls_logits.shape[-2:])
+        mask_flat = mask_logits.reshape(B * S, *mask_logits.shape[-3:])
+    else:
+        cls_flat = cls_logits
+        mask_flat = mask_logits
+
+    log_p_class = F.log_softmax(cls_flat, dim=-1)[..., :-1]  # drop no-object
+    log_p_mask = F.logsigmoid(mask_flat)
+
+    # [B*S, C, Q, 1, 1] + [B*S, 1, Q, H, W] -> logsumexp over Q
+    log_p_class = log_p_class.transpose(1, 2)  # [B*S, C, Q]
+    log_p = torch.logsumexp(
+        log_p_class.unsqueeze(-1).unsqueeze(-1) + log_p_mask.unsqueeze(1),
+        dim=2,
+    )
+
+    if cls_logits.dim() == 4:
+        log_p = log_p.reshape(B, S, *log_p.shape[1:])
+    return log_p
+
+
 def collate_fn(batch: List[Dict]) -> Dict:
     # batch size small; dino/dpt have varying spatial sizes per level but consistent within a scene
     dino = torch.stack([b["dino"] for b in batch], dim=0)
@@ -1012,7 +1041,7 @@ def focal_loss(
     input_type: str = "probs",
 ) -> torch.Tensor:
     valid = targets != ignore_index
-    if input_type == "logprobs":
+    if input_type != "probs":
         logp = logits
         safe_targets = targets.clone()
         safe_targets[~valid] = 0
@@ -1446,7 +1475,14 @@ def main() -> None:
             with torch.cuda.amp.autocast(enabled=args.use_half and device.type == "cuda"):
                 cls_logits, mask_logits = model(dino, dpt_levels, label_shape=(H, W))
                 S_frames = cls_logits.shape[1] if cls_logits.dim() == 4 else 1
-                seg_logits = dense_logits_from_queries(cls_logits, mask_logits, B=dino.shape[0], S=S_frames)  # [B, S, C, H', W'] or [B,C,H',W']
+                if args.loss_input == "loglse":
+                    seg_logits = dense_logprobs_from_queries(
+                        cls_logits, mask_logits, B=dino.shape[0], S=S_frames
+                    )
+                else:
+                    seg_logits = dense_logits_from_queries(
+                        cls_logits, mask_logits, B=dino.shape[0], S=S_frames
+                    )
                 if seg_logits.dim() == 5:
                     seg_logits = seg_logits.reshape(dino.shape[0] * S_frames, *seg_logits.shape[2:])
                 # Compute loss at the native mask resolution to save memory; downsample labels instead of upsampling logits.
@@ -1483,7 +1519,7 @@ def main() -> None:
                             f"to ignore_index={args.ignore_index}"
                         )
                 seg_loss_input = seg_logits
-                if args.loss_input == "logprobs":
+                if args.loss_input != "probs":
                     # Treat seg_logits as unnormalized scores; convert to log-probabilities.
                     seg_loss_input = F.log_softmax(seg_logits, dim=1)
             loss = focal_loss(
