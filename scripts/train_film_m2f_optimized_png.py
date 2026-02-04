@@ -1440,7 +1440,8 @@ def main() -> None:
                         )
                 seg_loss_input = seg_logits
                 if args.loss_input == "logprobs":
-                    seg_loss_input = seg_logits.clamp_min(1e-8).log()
+                    # Treat seg_logits as unnormalized scores; convert to log-probabilities.
+                    seg_loss_input = F.log_softmax(seg_logits, dim=1)
             loss = focal_loss(
                 seg_loss_input,
                 label_down,
