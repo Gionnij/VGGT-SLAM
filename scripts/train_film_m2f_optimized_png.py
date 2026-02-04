@@ -27,6 +27,7 @@ import statistics
 import math
 import sys
 import threading
+import warnings
 from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
@@ -99,6 +100,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
     p.add_argument("--focal-alpha", type=float, default=0.25, help="Alpha weighting for focal loss.")
     p.add_argument("--focal-gamma", type=float, default=2.0, help="Gamma exponent for focal loss.")
+    p.add_argument(
+        "--loss-input",
+        choices=["probs", "logprobs"],
+        default="probs",
+        help="Interpret seg scores as probs (legacy) or logprobs for loss computation.",
+    )
     p.add_argument(
         "--loss-scale",
         type=float,
@@ -204,6 +211,12 @@ def parse_args() -> argparse.Namespace:
         help="Print gradient norms for the first N steps (0 disables).",
     )
     p.add_argument(
+        "--debug-remap",
+        type=int,
+        default=0,
+        help="Print raw vs remapped label stats for the first N steps (0 disables).",
+    )
+    p.add_argument(
         "--no-debug-print",
         action="store_true",
         help="Disable per-batch debug prints to reduce overhead.",
@@ -213,6 +226,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="Log loss/grad stats every N steps.",
+    )
+    p.add_argument(
+        "--suppress-warnings",
+        action="store_true",
+        help="Suppress Python warnings for cleaner output.",
     )
     p.add_argument(
         "--run-dir",
@@ -611,6 +629,7 @@ class ChunkDataset(Dataset):
             "dino": dino,
             "dpt_levels": dpt_levels,
             "label": label,
+            "label_path": str(label_path),
             "image_size": sample["image_size"],
         }
 
@@ -819,6 +838,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
         "dpt_levels": dpt_levels,
         "labels": labels,
         "chunk_paths": [b["chunk_path"] for b in batch],
+        "label_paths": [b["label_path"] for b in batch],
         "image_sizes": [b["image_size"] for b in batch],
     }
 
@@ -959,12 +979,23 @@ def focal_loss(
     gamma: float,
     reduction: str = "mean",
     batch_size: Optional[int] = None,
+    input_type: str = "probs",
 ) -> torch.Tensor:
-    ce = F.cross_entropy(logits, targets, reduction="none", ignore_index=ignore_index)
     valid = targets != ignore_index
+    if input_type == "logprobs":
+        logp = logits
+        safe_targets = targets.clone()
+        safe_targets[~valid] = 0
+        logp_y = logp.gather(1, safe_targets.unsqueeze(1)).squeeze(1)
+        ce = -logp_y
+        pt = logp_y.exp()
+        ce = ce.masked_fill(~valid, 0.0)
+        pt = pt.masked_fill(~valid, 0.0)
+    else:
+        ce = F.cross_entropy(logits, targets, reduction="none", ignore_index=ignore_index)
+        pt = torch.exp(-ce)
     if not valid.any():
         return ce.sum() * 0.0
-    pt = torch.exp(-ce)
     focal = ((1 - pt) ** gamma) * ce
     if alpha is not None and alpha > 0:
         focal = alpha * focal
@@ -1028,6 +1059,8 @@ def _atomic_save_checkpoint(path: Path, payload: Dict) -> Path:
 
 def main() -> None:
     args = parse_args()
+    if args.suppress_warnings:
+        warnings.filterwarnings("ignore")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset_root = Path(args.dataset_root).expanduser()
     if args.num_workers_auto or args.num_workers is None:
@@ -1211,6 +1244,7 @@ def main() -> None:
     diag_summary_printed = False
     debug_labels_left = max(0, int(args.debug_labels))
     debug_grads_left = max(0, int(args.debug_grads))
+    debug_remap_left = max(0, int(args.debug_remap))
 
     def _print_diag_summary() -> None:
         nonlocal diag_summary_printed
@@ -1344,6 +1378,25 @@ def main() -> None:
             labels = batch["labels"]
             H, W = labels[0].shape[-2:]
             label_tensor = torch.stack(labels, dim=0).to(device, non_blocking=True)
+            if debug_remap_left > 0:
+                label_paths = batch.get("label_paths") or []
+                if label_paths:
+                    raw_labels = [load_label_png(Path(p)) for p in label_paths]
+                    raw_tensor = torch.stack(raw_labels, dim=0)
+                    raw_valid = raw_tensor != args.ignore_index
+                    remap_cpu = label_tensor.detach().cpu()
+                    remap_valid = remap_cpu != args.ignore_index
+                    raw_unique = torch.unique(raw_tensor[raw_valid]) if raw_valid.any() else torch.tensor([])
+                    remap_unique = torch.unique(remap_cpu[remap_valid]) if remap_valid.any() else torch.tensor([])
+                    raw_min = int(raw_unique.min().item()) if raw_unique.numel() else -1
+                    raw_max = int(raw_unique.max().item()) if raw_unique.numel() else -1
+                    remap_min = int(remap_unique.min().item()) if remap_unique.numel() else -1
+                    remap_max = int(remap_unique.max().item()) if remap_unique.numel() else -1
+                    print(
+                        f"[dbg] remap raw_unique={raw_unique.numel()} raw_min={raw_min} raw_max={raw_max} "
+                        f"remap_unique={remap_unique.numel()} remap_min={remap_min} remap_max={remap_max}"
+                    )
+                    debug_remap_left -= 1
 
             optim.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.use_half and device.type == "cuda"):
@@ -1379,20 +1432,24 @@ def main() -> None:
                 )
                 if invalid.any():
                     label_down = label_down.masked_fill(invalid, args.ignore_index)
-                    if not args.no_debug_print and step == 0 and epoch == 0:
+                    if not args.no_debug_print and step == 0 and epoch == 0 and not args.suppress_warnings:
                         bad_count = int(invalid.sum().item())
                         print(
                             f"[warn] mapped {bad_count} labels outside [0,{args.num_classes - 1}] "
                             f"to ignore_index={args.ignore_index}"
                         )
+                seg_loss_input = seg_logits
+                if args.loss_input == "logprobs":
+                    seg_loss_input = seg_logits.clamp_min(1e-8).log()
             loss = focal_loss(
-                seg_logits,
+                seg_loss_input,
                 label_down,
                 ignore_index=args.ignore_index,
                 alpha=args.focal_alpha,
                 gamma=args.focal_gamma,
                 reduction=args.loss_reduction,
                 batch_size=label_down.shape[0],
+                input_type=args.loss_input,
             )
             if args.loss_scale != 1.0:
                 loss = loss * float(args.loss_scale)
