@@ -250,6 +250,11 @@ def parse_args() -> argparse.Namespace:
         help="Print class-logit stats for the first N steps (0 disables).",
     )
     p.add_argument(
+        "--debug-per-epoch",
+        action="store_true",
+        help="Reset debug counters each epoch (prints N steps per epoch instead of per run).",
+    )
+    p.add_argument(
         "--mask-logit-temp",
         type=float,
         default=1.0,
@@ -1360,13 +1365,21 @@ def main() -> None:
     diag_step_times: List[float] = []
     diag_unique_counts: List[int] = []
     diag_summary_printed = False
-    debug_labels_left = max(0, int(args.debug_labels))
-    debug_grads_left = max(0, int(args.debug_grads))
-    debug_remap_left = max(0, int(args.debug_remap))
-    debug_probs_left = max(0, int(args.debug_probs))
-    debug_preds_left = max(0, int(args.debug_preds))
-    debug_masks_left = max(0, int(args.debug_masks))
-    debug_classes_left = max(0, int(args.debug_classes))
+    debug_labels_count = max(0, int(args.debug_labels))
+    debug_grads_count = max(0, int(args.debug_grads))
+    debug_remap_count = max(0, int(args.debug_remap))
+    debug_probs_count = max(0, int(args.debug_probs))
+    debug_preds_count = max(0, int(args.debug_preds))
+    debug_masks_count = max(0, int(args.debug_masks))
+    debug_classes_count = max(0, int(args.debug_classes))
+
+    debug_labels_left = debug_labels_count
+    debug_grads_left = debug_grads_count
+    debug_remap_left = debug_remap_count
+    debug_probs_left = debug_probs_count
+    debug_preds_left = debug_preds_count
+    debug_masks_left = debug_masks_count
+    debug_classes_left = debug_classes_count
 
     def _print_diag_summary() -> None:
         nonlocal diag_summary_printed
@@ -1460,6 +1473,14 @@ def main() -> None:
         epoch_start_time = time.perf_counter()
         epoch_steps_done = 0
         epoch_time_window: deque = deque(maxlen=eta_window)
+        if args.debug_per_epoch:
+            debug_labels_left = debug_labels_count
+            debug_grads_left = debug_grads_count
+            debug_remap_left = debug_remap_count
+            debug_probs_left = debug_probs_count
+            debug_preds_left = debug_preds_count
+            debug_masks_left = debug_masks_count
+            debug_classes_left = debug_classes_count
         diagnose_epoch = diagnose_active and epoch == 0
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
