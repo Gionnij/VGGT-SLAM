@@ -244,6 +244,12 @@ def parse_args() -> argparse.Namespace:
         help="Print mask logits stats for the first N steps (0 disables).",
     )
     p.add_argument(
+        "--debug-classes",
+        type=int,
+        default=0,
+        help="Print class-logit stats for the first N steps (0 disables).",
+    )
+    p.add_argument(
         "--mask-logit-temp",
         type=float,
         default=1.0,
@@ -1360,6 +1366,7 @@ def main() -> None:
     debug_probs_left = max(0, int(args.debug_probs))
     debug_preds_left = max(0, int(args.debug_preds))
     debug_masks_left = max(0, int(args.debug_masks))
+    debug_classes_left = max(0, int(args.debug_classes))
 
     def _print_diag_summary() -> None:
         nonlocal diag_summary_printed
@@ -1516,6 +1523,38 @@ def main() -> None:
             optim.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.use_half and device.type == "cuda"):
                 cls_logits, mask_logits = model(dino, dpt_levels, label_shape=(H, W))
+                if debug_classes_left > 0:
+                    cls_stats = cls_logits.float()
+                    print(
+                        "[dbg] cls_logits stats "
+                        f"min={cls_stats.min().item():.3f} "
+                        f"max={cls_stats.max().item():.3f} "
+                        f"mean={cls_stats.mean().item():.3f} "
+                        f"std={cls_stats.std(unbiased=False).item():.3f}"
+                    )
+                    cls_probs = F.softmax(cls_stats, dim=-1)
+                    if cls_probs.dim() == 4:
+                        cls_probs_flat = cls_probs.reshape(-1, cls_probs.shape[-2], cls_probs.shape[-1])
+                    else:
+                        cls_probs_flat = cls_probs.reshape(-1, cls_probs.shape[-2], cls_probs.shape[-1])
+                    top_vals, top_idx = cls_probs_flat[..., :-1].max(dim=-1)
+                    noobj = cls_probs_flat[..., -1]
+                    noobj_mean = float(noobj.mean().item())
+                    top_mean = float(top_vals.mean().item())
+                    noobj_gt = float((noobj > top_vals).float().mean().item())
+                    top_hist = torch.bincount(
+                        top_idx.reshape(-1).cpu(), minlength=args.num_classes
+                    )
+                    top = torch.topk(top_hist, k=min(5, args.num_classes))
+                    top_pairs = list(zip(top.indices.tolist(), top.values.tolist()))
+                    print(
+                        "[dbg] cls_probs "
+                        f"noobj_mean={noobj_mean:.3f} "
+                        f"top_mean={top_mean:.3f} "
+                        f"noobj_gt_top={noobj_gt:.3f} "
+                        f"top5={top_pairs}"
+                    )
+                    debug_classes_left -= 1
                 if args.mask_logit_temp != 1.0:
                     mask_logits = mask_logits / float(args.mask_logit_temp)
                 if args.mask_logit_clamp is not None:
