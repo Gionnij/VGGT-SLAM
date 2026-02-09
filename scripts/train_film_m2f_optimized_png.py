@@ -113,7 +113,16 @@ def parse_args() -> argparse.Namespace:
         "--loss-input",
         choices=["probs", "logprobs", "loglse"],
         default="probs",
-        help="Interpret seg scores as probs (legacy), logprobs, or logprobs via logsumexp over queries.",
+        help=(
+            "Interpret seg scores as probs (legacy), logprobs (log of dense probs), "
+            "or logprobs via logsumexp over queries."
+        ),
+    )
+    p.add_argument(
+        "--loss-eps",
+        type=float,
+        default=1e-6,
+        help="Epsilon for log-prob computation when --loss-input=logprobs.",
     )
     p.add_argument(
         "--loss-scale",
@@ -1583,17 +1592,17 @@ def main() -> None:
                     mask_logits = mask_logits.clamp(min=lo, max=hi)
                 S_frames = cls_logits.shape[1] if cls_logits.dim() == 4 else 1
                 if args.loss_input == "loglse":
-                    seg_logits = dense_logprobs_from_queries(
+                    seg_scores = dense_logprobs_from_queries(
                         cls_logits, mask_logits, B=dino.shape[0], S=S_frames
                     )
                 else:
-                    seg_logits = dense_logits_from_queries(
+                    seg_scores = dense_logits_from_queries(
                         cls_logits, mask_logits, B=dino.shape[0], S=S_frames
                     )
-                if seg_logits.dim() == 5:
-                    seg_logits = seg_logits.reshape(dino.shape[0] * S_frames, *seg_logits.shape[2:])
+                if seg_scores.dim() == 5:
+                    seg_scores = seg_scores.reshape(dino.shape[0] * S_frames, *seg_scores.shape[2:])
                 # Compute loss at the native mask resolution to save memory; downsample labels instead of upsampling logits.
-                target_size = seg_logits.shape[-2:]
+                target_size = seg_scores.shape[-2:]
                 label_down = F.interpolate(label_tensor.unsqueeze(1).float(), size=target_size, mode="nearest").squeeze(1).long()
                 if debug_labels_left > 0:
                     msg_full = _summarize_labels(
@@ -1625,15 +1634,19 @@ def main() -> None:
                             f"[warn] mapped {bad_count} labels outside [0,{args.num_classes - 1}] "
                             f"to ignore_index={args.ignore_index}"
                         )
-                seg_loss_input = seg_logits
-                if args.loss_input != "probs":
-                    # Treat seg_logits as unnormalized scores; convert to log-probabilities.
-                    seg_loss_input = F.log_softmax(seg_logits, dim=1)
+                if args.loss_input == "probs":
+                    seg_loss_input = seg_scores
+                elif args.loss_input == "logprobs":
+                    eps = float(args.loss_eps)
+                    seg_log = seg_scores.clamp_min(eps).log()
+                    seg_loss_input = seg_log - torch.logsumexp(seg_log, dim=1, keepdim=True)
+                else:  # loglse
+                    seg_loss_input = seg_scores - torch.logsumexp(seg_scores, dim=1, keepdim=True)
 
                 logp_debug = None
                 if debug_probs_left > 0:
                     if args.loss_input == "probs":
-                        logp_debug = F.log_softmax(seg_logits.float(), dim=1)
+                        logp_debug = F.log_softmax(seg_scores.float(), dim=1)
                     else:
                         logp_debug = seg_loss_input.float()
                     prob_sum = logp_debug.exp().sum(dim=1)
@@ -1650,7 +1663,7 @@ def main() -> None:
                 if debug_preds_left > 0:
                     if logp_debug is None:
                         if args.loss_input == "probs":
-                            logp_debug = F.log_softmax(seg_logits.float(), dim=1)
+                            logp_debug = F.log_softmax(seg_scores.float(), dim=1)
                         else:
                             logp_debug = seg_loss_input.float()
                     pred = logp_debug.argmax(dim=1)
