@@ -1638,7 +1638,7 @@ def main() -> None:
                     seg_loss_input = seg_scores
                 elif args.loss_input == "logprobs":
                     eps = float(args.loss_eps)
-                    seg_log = seg_scores.clamp_min(eps).log()
+                    seg_log = (seg_scores + eps).log()
                     seg_loss_input = seg_log - torch.logsumexp(seg_log, dim=1, keepdim=True)
                 else:  # loglse
                     seg_loss_input = seg_scores - torch.logsumexp(seg_scores, dim=1, keepdim=True)
