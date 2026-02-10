@@ -10,7 +10,7 @@ from typing import Iterable, List, Tuple
 
 
 LOG_PATTERN = re.compile(
-    r"\[epoch\s+(?P<epoch>\d+)\]\s+step\s+(?P<step>\d+)\s+"
+    r"\[epoch\s+(?P<epoch>\d+)\]\s+step\s+(?P<step>\d+)(?:/\d+)?\s+"
     r"loss\s+(?P<loss>[0-9.eE+-]+)\s+"
     r"grad_norm\s+fusion=(?P<fusion>[0-9.eE+-]+)\s+head=(?P<head>[0-9.eE+-]+)"
 )

@@ -1817,7 +1817,8 @@ def main() -> None:
                     display_step = epoch_done
                     print(
                         f"[epoch {epoch+1}] step {display_step}/{steps_this_epoch} "
-                        f"loss {avg:.4f} overall={overall_pct:.1f}% "
+                        f"loss {avg:.4f} grad_norm fusion={fusion_norm:.2e} head={head_norm:.2e} "
+                        f"overall={overall_pct:.1f}% "
                         f"epoch_eta={_format_eta_minutes(epoch_eta / 60.0)} "
                         f"train_eta={_format_eta_minutes(train_eta / 60.0)}"
                     )
