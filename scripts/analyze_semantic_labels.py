@@ -119,6 +119,7 @@ def load_mask(path: Path) -> np.ndarray:
     return arr
 
 
+
 def update_counters(
     mask: np.ndarray,
     *,
@@ -282,9 +283,12 @@ def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
     m = 0.5 * (p + q)
     p = np.where(p > 0, p, 0)
     q = np.where(q > 0, q, 0)
-    m = np.where(m > 0, m, 1)
-    kl_pm = np.sum(np.where(p > 0, p * np.log2(p / m), 0.0))
-    kl_qm = np.sum(np.where(q > 0, q * np.log2(q / m), 0.0))
+    ratio_pm = np.divide(p, m, out=np.ones_like(p), where=m > 0)
+    ratio_qm = np.divide(q, m, out=np.ones_like(q), where=m > 0)
+    log_pm = np.log2(ratio_pm, where=(p > 0) & (m > 0), out=np.zeros_like(ratio_pm))
+    log_qm = np.log2(ratio_qm, where=(q > 0) & (m > 0), out=np.zeros_like(ratio_qm))
+    kl_pm = np.sum(p * log_pm)
+    kl_qm = np.sum(q * log_qm)
     return 0.5 * (kl_pm + kl_qm)
 
 
@@ -431,7 +435,8 @@ def main() -> None:
             p_scene = kept_counts / kept_pixels
             js = _js_divergence(p_scene, p_global)
             l1 = float(np.sum(np.abs(p_scene - p_global)))
-            entropy = float(-np.sum(np.where(p_scene > 0, p_scene * np.log2(p_scene), 0.0)))
+            log_scene = np.log2(p_scene, where=p_scene > 0, out=np.zeros_like(p_scene))
+            entropy = float(-np.sum(p_scene * log_scene))
         else:
             js = float("inf")
             l1 = float("inf")
