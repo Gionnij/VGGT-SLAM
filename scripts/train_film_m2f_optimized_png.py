@@ -106,6 +106,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--config-path", help="Mask2Former config path (defaults to COCO R50).")
     p.add_argument("--weights-path", help="Optional Detectron2-style Mask2Former checkpoint to init from.")
+    p.add_argument(
+        "--resume",
+        default="none",
+        help="Resume from 'auto' (latest in ckpt-dir), 'none', or a checkpoint path.",
+    )
     p.add_argument("--use-half", action="store_true", help="Use mixed precision training.")
     p.add_argument("--focal-alpha", type=float, default=0.25, help="Alpha weighting for focal loss.")
     p.add_argument("--focal-gamma", type=float, default=2.0, help="Gamma exponent for focal loss.")
@@ -1155,6 +1160,15 @@ def _is_rank0() -> bool:
         return True
 
 
+def _latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
+    if not ckpt_dir.is_dir():
+        return None
+    candidates = [p for p in ckpt_dir.glob("*.pt") if not p.name.endswith(".tmp")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def _checkpoint_path(ckpt_dir: Path, epoch: int, global_step: int) -> Path:
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     return ckpt_dir / f"film_m2f_epoch{epoch:04d}_step{global_step:08d}_{ts}.pt"
@@ -1366,6 +1380,49 @@ def main() -> None:
     scheduler = None  # placeholder for future schedulers; still checkpointed for completeness
 
     global_step = 0
+    start_epoch = 0
+    start_step_in_epoch = 0
+
+    resume_arg = (args.resume or "none").strip().lower()
+    resume_path: Optional[Path] = None
+    if resume_arg == "auto":
+        resume_path = _latest_checkpoint(ckpt_dir)
+        if resume_path:
+            print(f"[resume] auto-selected latest checkpoint: {resume_path}")
+    elif resume_arg not in ("", "none"):
+        resume_path = Path(args.resume).expanduser()
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+    if resume_path:
+        state = torch.load(resume_path, map_location=device)
+        model_state = state.get("model_state") if isinstance(state, dict) else None
+        if model_state is None and isinstance(state, dict):
+            model_state = state
+        if not isinstance(model_state, dict):
+            raise RuntimeError(f"Unexpected resume checkpoint format: {resume_path}")
+        missing, unexpected = model.load_state_dict(model_state, strict=False)
+        if missing:
+            print(f"[resume] missing model keys: {len(missing)}")
+        if unexpected:
+            print(f"[resume] unexpected model keys: {len(unexpected)}")
+        if isinstance(state, dict) and "optimizer_state" in state:
+            optim.load_state_dict(state["optimizer_state"])
+        if scheduler and isinstance(state, dict) and state.get("scheduler_state"):
+            scheduler.load_state_dict(state["scheduler_state"])
+        if isinstance(state, dict) and "scaler_state" in state and state["scaler_state"] is not None:
+            scaler.load_state_dict(state["scaler_state"])
+        if isinstance(state, dict):
+            start_epoch = int(state.get("epoch", 0))
+            start_step_in_epoch = int(state.get("step_in_epoch", -1)) + 1
+            if state.get("save_reason") == "epoch_end":
+                start_epoch += 1
+                start_step_in_epoch = 0
+            start_step_in_epoch = max(0, start_step_in_epoch)
+            global_step = int(state.get("global_step", 0))
+        print(
+            f"[resume] epoch={start_epoch+1} step_in_epoch={start_step_in_epoch} global_step={global_step}"
+        )
 
     last_save_time = time.time()
     diagnose_active = diagnose_batches > 0
@@ -1445,19 +1502,37 @@ def main() -> None:
         return out_path
 
     steps_per_epoch = math.ceil(len(ds) / max(1, int(args.batch_size)))
+    if start_epoch >= args.epochs:
+        print(f"[info] start_epoch {start_epoch} >= total epochs {args.epochs}; nothing to train.")
+        return
+
+    resume_sample_offset = 0
+    resume_step_in_epoch = start_step_in_epoch
+    if start_step_in_epoch > 0:
+        resume_sample_offset = start_step_in_epoch * int(args.batch_size)
+
     total_steps = steps_per_epoch * args.epochs
-    completed_steps = 0
+    completed_steps = start_epoch * steps_per_epoch
     use_tqdm = sys.stderr.isatty()
     log_every = max(1, int(args.log_every))
     eta_window = 1500
     train_start_time = time.perf_counter()
     steps_done = 0
     train_time_window: deque = deque(maxlen=eta_window)
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         # Make shuffling deterministic per epoch when using our sampler.
         if isinstance(sampler, ChunkShuffleSampler):
             sampler.set_epoch(epoch)
-            sampler.set_start_offset(0)
+            if epoch == start_epoch and resume_sample_offset > 0:
+                sampler.set_start_offset(resume_sample_offset)
+                skip_steps = 0
+            else:
+                sampler.set_start_offset(0)
+                skip_steps = 0
+        else:
+            skip_steps = start_step_in_epoch if epoch == start_epoch else 0
+        if epoch > start_epoch:
+            start_step_in_epoch = 0
         if head_frozen and epoch >= int(args.freeze_head_epochs):
             for p in head_params:
                 p.requires_grad = True
@@ -1490,16 +1565,20 @@ def main() -> None:
             debug_preds_left = debug_preds_count
             debug_masks_left = debug_masks_count
             debug_classes_left = debug_classes_count
-        diagnose_epoch = diagnose_active and epoch == 0
+        diagnose_epoch = diagnose_active and epoch == start_epoch
         if diagnose_epoch and args.num_workers == 0:
             ds.reset_cache_stats()
         steps_this_epoch = steps_per_epoch
+        resume_step = resume_step_in_epoch if epoch == start_epoch else 0
+        resume_offset = resume_step if (resume_step > 0 and skip_steps == 0) else 0
+        if resume_step > 0:
+            completed_steps += resume_step
         data_iter = _timed_dl_iter(dl) if diagnose_epoch else dl
         epoch_bar = None
         if use_tqdm:
             epoch_bar = tqdm(
                 total=steps_this_epoch,
-                initial=0,
+                initial=resume_step,
                 desc=f"epoch {epoch+1}/{args.epochs}",
                 unit="step",
                 leave=True,
@@ -1507,10 +1586,14 @@ def main() -> None:
                 dynamic_ncols=True,
             )
         for step, data in enumerate(data_iter):
+            if step < skip_steps:
+                # Skip steps already completed before the checkpoint.
+                continue
             if diagnose_epoch:
                 t_fetch, batch = data
             else:
                 t_fetch, batch = None, data
+            step_abs = step + resume_offset
             diagnose_now = diagnose_epoch and diagnose_remaining > 0
             if diagnose_now:
                 _maybe_synchronize(device)
@@ -1756,7 +1839,7 @@ def main() -> None:
                 else:
                     cache_msg = " cache=unavailable"
                 print(
-                    f"[diag] epoch={epoch+1} step={step+1} "
+                    f"[diag] epoch={epoch+1} step={step_abs+1} "
                     f"t_fetch_ms={t_fetch * 1000:.1f} "
                     f"t_step_ms={t_step * 1000:.1f} "
                     f"unique_chunks={unique_chunks} "
@@ -1769,7 +1852,7 @@ def main() -> None:
 
             running += loss.item()
             global_step += 1
-            step_in_epoch = step
+            step_in_epoch = step_abs
             completed_steps += 1
             steps_done += 1
             epoch_steps_done += 1
@@ -1780,7 +1863,7 @@ def main() -> None:
             if epoch_bar is not None:
                 epoch_bar.update(1)
                 epoch_bar.set_postfix_str(f"overall={overall_pct:.1f}%")
-            if (step + 1) % log_every == 0:
+            if (step_abs + 1) % log_every == 0:
                 avg = running / log_every
                 grad_msg = ""
                 if scaler.is_enabled() and not unscaled:
@@ -1795,9 +1878,9 @@ def main() -> None:
                 head_norm = float(head_param.grad.norm().item()) if head_param is not None and head_param.grad is not None else 0.0
                 grad_msg = f" grad_norm fusion={fusion_norm:.2e} head={head_norm:.2e}"
                 if use_tqdm:
-                    tqdm.write(f"[epoch {epoch+1}] step {step+1} loss {avg:.4f}{grad_msg}")
+                    tqdm.write(f"[epoch {epoch+1}] step {step_abs+1} loss {avg:.4f}{grad_msg}")
                 else:
-                    epoch_done = step + 1
+                    epoch_done = step_abs + 1
                     remaining_epoch_steps = max(0, steps_this_epoch - epoch_done)
                     if len(epoch_time_window) >= 2:
                         epoch_span = epoch_time_window[-1] - epoch_time_window[0]
