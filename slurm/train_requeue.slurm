@@ -132,6 +132,13 @@ else
   echo "[env] using TRAIN_PYTHON=${TRAIN_PYTHON} (provided)"
 fi
 
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train_film_m2f_optimized.py}"
+if [ ! -f "${REPO_ROOT}/${TRAIN_SCRIPT}" ]; then
+  echo "[err] TRAIN_SCRIPT not found: ${REPO_ROOT}/${TRAIN_SCRIPT}"
+  exit 1
+fi
+echo "[env] using TRAIN_SCRIPT=${TRAIN_SCRIPT}"
+
 echo "[envcheck] verifying detectron2/mask2former imports with ${TRAIN_PYTHON}"
 "${TRAIN_PYTHON}" - <<'PY'
 import importlib, sys
@@ -164,7 +171,7 @@ for p in sys.path:
     print(" ", p)
 PY
 
-CMD=("$TRAIN_PYTHON" -u scripts/train_film_m2f_optimized.py \
+CMD=("$TRAIN_PYTHON" -u "${TRAIN_SCRIPT}" \
   --dataset-root "$DATASET_ROOT" \
   --run-dir "$RUN_DIR" \
   --ckpt-dir "$RUN_DIR/checkpoints")
