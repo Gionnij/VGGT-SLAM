@@ -80,33 +80,43 @@ LOG_PATH="$RUN_DIR/logs/train_${SLURM_JOB_ID:-manual}.log"
 touch "$LOG_PATH"
 exec > >(tee -a "$LOG_PATH") 2>&1
 
+REQUEUE_ONCE_FILE="$RUN_DIR/.requeue_requested"
+rm -f "$REQUEUE_ONCE_FILE"
+
 requeue_job() {
   local reason="$1"
-  local delay="${REQUEUE_DELAY_SEC:-90}"
+  local delay="${REQUEUE_DELAY_SEC:-0}"
+  if [ -f "$REQUEUE_ONCE_FILE" ]; then
+    echo "[signal] requeue already requested earlier; ignoring (${reason})."
+    return
+  fi
+  touch "$REQUEUE_ONCE_FILE"
   if [ -z "${SLURM_JOB_ID:-}" ]; then
-    echo "[signal] SLURM_JOB_ID missing; cannot requeue." | tee -a "$LOG_PATH"
+    echo "[signal] SLURM_JOB_ID missing; cannot requeue."
     return
   fi
   if ! command -v scontrol >/dev/null 2>&1; then
-    echo "[signal] scontrol not found; cannot requeue." | tee -a "$LOG_PATH"
+    echo "[signal] scontrol not found; cannot requeue."
     return
   fi
-  echo "[signal] scheduling requeue in ${delay}s (reason=${reason})." | tee -a "$LOG_PATH"
-  (
+  if [ "$delay" -gt 0 ] 2>/dev/null; then
+    echo "[signal] delaying requeue by ${delay}s (reason=${reason})."
     sleep "$delay"
-    echo "[signal] requeueing job ${SLURM_JOB_ID} (reason=${reason})." | tee -a "$LOG_PATH"
-    scontrol requeue "${SLURM_JOB_ID}" || echo "[warn] scontrol requeue failed." | tee -a "$LOG_PATH"
-  ) &
+  fi
+  echo "[signal] requeueing job ${SLURM_JOB_ID} now (reason=${reason})."
+  if ! scontrol requeue "${SLURM_JOB_ID}"; then
+    echo "[warn] scontrol requeue failed."
+  fi
 }
 
 on_usr1() {
-  echo "[signal] USR1 received at $(date -Iseconds); requesting checkpoint." | tee -a "$LOG_PATH"
+  echo "[signal] USR1 received at $(date -Iseconds); requesting checkpoint."
   touch "$RUN_DIR/REQUEST_SAVE"
   requeue_job "USR1"
 }
 
 on_term() {
-  echo "[signal] TERM received at $(date -Iseconds); requesting checkpoint." | tee -a "$LOG_PATH"
+  echo "[signal] TERM received at $(date -Iseconds); requesting checkpoint."
   touch "$RUN_DIR/REQUEST_SAVE"
   requeue_job "TERM"
 }
