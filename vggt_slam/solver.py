@@ -433,7 +433,10 @@ class Solver:
         new_submap = Submap(new_pcd_num)
         # new_submap.add_all_frames(images)
         new_submap.add_all_frames(images)
-        new_submap.set_frame_ids(image_names)
+        if frame_ids_window is not None:
+            new_submap.set_frame_ids(list(frame_ids_window))
+        else:
+            new_submap.set_frame_ids(image_names)
         new_submap.set_all_retrieval_vectors(self.image_retrieval.get_all_submap_embeddings(new_submap))
 
         # TODO implement this

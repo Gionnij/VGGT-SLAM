@@ -163,6 +163,21 @@ hpc_robot_bridge () {
   local save_every="${HPC_ROBOT_SAVE_EVERY:-0}"
   local save_dir="${HPC_ROBOT_SAVE_DIR:-$HOME/src/VGGT-SLAM/robot_probe_frames}"
   local use_fastdds_xml="${HPC_BRIDGE_USE_FASTDDS_XML:-0}"
+  local undistort="${HPC_ROBOT_UNDISTORT:-0}"
+  local undistort_alpha="${HPC_ROBOT_UNDISTORT_ALPHA:-0.0}"
+  local fx="${HPC_ROBOT_FX:--1.0}"
+  local fy="${HPC_ROBOT_FY:--1.0}"
+  local cx="${HPC_ROBOT_CX:--1.0}"
+  local cy="${HPC_ROBOT_CY:--1.0}"
+  local k1="${HPC_ROBOT_K1:-0.0}"
+  local k2="${HPC_ROBOT_K2:-0.0}"
+  local p1="${HPC_ROBOT_P1:-0.0}"
+  local p2="${HPC_ROBOT_P2:-0.0}"
+  local k3="${HPC_ROBOT_K3:-0.0}"
+  local undistort_args=""
+  if [ "${undistort}" = "1" ]; then
+    undistort_args="--undistort --undistort-alpha ${undistort_alpha} --fx ${fx} --fy ${fy} --cx ${cx} --cy ${cy} --k1 ${k1} --k2 ${k2} --p1 ${p1} --p2 ${p2} --k3 ${k3}"
+  fi
   local SIF="${HOME}/containers/ros_humble_perception.sif"
 
   singularity exec --cleanenv "${SIF}" bash -lc "
@@ -188,7 +203,8 @@ hpc_robot_bridge () {
       --max-height 540 \
       --stats-interval ${stats_interval} \
       --save-every ${save_every} \
-      --save-dir ${save_dir}
+      --save-dir ${save_dir} \
+      ${undistort_args}
   "
 }
 
@@ -228,7 +244,8 @@ PY
 
 export SINGULARITYENV_PYTHONWARNINGS="ignore:xFormers is available:UserWarning,ignore:xFormers is not available:UserWarning"
 
-run_vggt () {
+_run_vggt_live_mode () {
+  local mode="${1:-vggt}"  # vggt | pipeline
   cleanenv 2>/dev/null || true
   if command -v module >/dev/null 2>&1; then
     module load singularity/3.9.5 2>/dev/null || true
@@ -244,6 +261,29 @@ run_vggt () {
   CPU_IP="130.89.6.254"
   local USE_DDS_SERVER="${USE_DDS_SERVER:-0}"
   local DDS_SERVER_ADDR="${ROS_DISCOVERY_SERVER:-${CPU_IP}:11811}"
+  local default_demo_root=""
+  local default_enable_taps="0"
+  local default_enable_film="0"
+  local default_enable_sem="0"
+  local default_pipeline_check="0"
+
+  if [ "${mode}" = "pipeline" ]; then
+    default_demo_root="${HOME}/src/VGGT-SLAM/demo"
+    default_enable_taps="1"
+    default_enable_film="1"
+    default_enable_sem="1"
+    default_pipeline_check="1"
+  fi
+
+  local DEMO_ROOT="${VGGT_DEMO_ROOT:-${default_demo_root}}"
+  local STOP_TOPIC="${VGGT_STOP_TOPIC:-/stream/stop}"
+  local LOG_RESULTS="${VGGT_LOG_RESULTS:-0}"
+  local FINETUNE_CKPT="${VGGT_FINETUNE_CKPT:-}"
+  local MAX_LIVE_STEPS="${VGGT_MAX_LIVE_STEPS:-0}"
+  local ENABLE_TAPS="${VGGT_ENABLE_TAPS:-${default_enable_taps}}"
+  local ENABLE_FILM="${VGGT_FUSE_FILM:-${default_enable_film}}"
+  local ENABLE_SEM="${VGGT_SEMANTIC_HEAD:-${default_enable_sem}}"
+  local ENABLE_PIPELINE_CHECK="${VGGT_PIPELINE_CHECK:-${default_pipeline_check}}"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -289,42 +329,98 @@ EOF
     export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
     if [ "'"${USE_DDS_SERVER}"'" = "1" ]; then
       export ROS_DISCOVERY_SERVER="'"${DDS_SERVER_ADDR}"'"
-      echo "[run_vggt] Discovery server: ${ROS_DISCOVERY_SERVER}"
-    fi
+	      echo "[run_${mode}] Discovery server: ${ROS_DISCOVERY_SERVER}"
+	    fi
 
-    export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:$PYTHONPATH"
+	    export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:$PYTHONPATH"
 
-    export VGGT_FUSE_FILM=1
-    export VGGT_FUSE_FILM_BLEND=0
-    export VGGT_FUSE_FILM_MODE=passive
-    export VGGT_FUSE_FILM_HIDDEN=512
-    export VGGT_FUSE_FILM_ALPHA=0.30
-    export VGGT_FUSE_FILM_TEST=1
+	    export VGGT_ENABLE_TAPS="'"${ENABLE_TAPS}"'"
+	    export VGGT_FUSE_FILM="'"${ENABLE_FILM}"'"
+	    export VGGT_FUSE_FILM_BLEND=0
+	    export VGGT_FUSE_FILM_MODE=passive
+	    export VGGT_FUSE_FILM_HIDDEN=512
+	    export VGGT_FUSE_FILM_ALPHA=0.30
+	    export VGGT_FUSE_FILM_TEST=1
 
-    export VGGT_SEMANTIC_HEAD=1
-    export VGGT_SEM_CLASSES=20
-    export VGGT_SEM_QUERIES=50
+	    export VGGT_SEMANTIC_HEAD="'"${ENABLE_SEM}"'"
+	    export VGGT_SEM_CLASSES=20
+	    export VGGT_SEM_QUERIES=50
 
-    export VGGT_PIPELINE_CHECK=1
-    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
+	    export VGGT_PIPELINE_CHECK="'"${ENABLE_PIPELINE_CHECK}"'"
+	    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
+	    export VGGT_DEMO_ROOT="'"${DEMO_ROOT}"'"
+	    export VGGT_STOP_TOPIC="'"${STOP_TOPIC}"'"
+	    export VGGT_LOG_RESULTS="'"${LOG_RESULTS}"'"
+	    export VGGT_FINETUNE_CKPT="'"${FINETUNE_CKPT}"'"
+	    export VGGT_MAX_LIVE_STEPS="'"${MAX_LIVE_STEPS}"'"
+	    [ -n "${VGGT_FINETUNE_CKPT:-}" ] && echo "[run_${mode}] Fine-tune checkpoint: ${VGGT_FINETUNE_CKPT}"
+	    [ -n "${VGGT_DEMO_ROOT:-}" ] && echo "[run_${mode}] Demo root: ${VGGT_DEMO_ROOT}"
+	    echo "[run_${mode}] taps=${VGGT_ENABLE_TAPS} film=${VGGT_FUSE_FILM} sem=${VGGT_SEMANTIC_HEAD}"
+	    EXTRA_ARGS=""
+	    if [ "${VGGT_LOG_RESULTS}" = "1" ]; then
+	      EXTRA_ARGS="${EXTRA_ARGS} --log_results"
+	    fi
+	    if [ -n "${VGGT_FINETUNE_CKPT}" ]; then
+	      EXTRA_ARGS="${EXTRA_ARGS} --finetune-checkpoint ${VGGT_FINETUNE_CKPT}"
+	    fi
 
-    /venvs/vggt/bin/python - <<'"'"'PY'"'"'
+	    /venvs/vggt/bin/python - <<'"'"'PY'"'"'
 import sys, torch, os
 print("python:", sys.executable)
 print("CUDA:", torch.version.cuda, "GPU?", torch.cuda.is_available())
+print("Taps enabled:", os.getenv("VGGT_ENABLE_TAPS"))
 print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
 print("FiLM blend  :", os.getenv("VGGT_FUSE_FILM_BLEND"))
 print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
+print("Sem head    :", os.getenv("VGGT_SEMANTIC_HEAD"))
 PY
 
-    /venvs/vggt/bin/python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
+	    /venvs/vggt/bin/python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
       --ros_image_topic /camera/image_color \
       --ros_info_topic  /camera/camera_info \
+      --ros_stop_topic "${VGGT_STOP_TOPIC}" \
       --window_size 15 --overlapping_window_size 1 \
       --target_fps 2.0 --ros2_queue_size 60 \
-      --local_model "$HOME/models/VGGT-1B/model.pt" \
-      --log_results
-  '
+      --max-live-steps "${VGGT_MAX_LIVE_STEPS}" \
+	      --local_model "$HOME/models/VGGT-1B/model.pt" \
+	      --demo-root "${VGGT_DEMO_ROOT}" \
+	      ${EXTRA_ARGS}
+	  '
+}
+
+# Minimal live VGGT (no taps/FiLM/semantic head by default).
+run_vggt () {
+  _run_vggt_live_mode vggt
+}
+
+# Full robotics pipeline (taps + FiLM + semantic head + demo outputs by default).
+run_pipeline () {
+  _run_vggt_live_mode pipeline
+}
+
+# Publish one stop message for the live ingest node.
+# Usage: stop_vggt_ingest [/stream/stop]
+stop_vggt_ingest () {
+  cleanenv 2>/dev/null || true
+  if command -v module >/dev/null 2>&1; then
+    module load singularity/3.9.5 2>/dev/null || true
+  fi
+
+  local topic="${1:-/stream/stop}"
+  local SIF="${HOME}/containers/ros_humble_perception.sif"
+
+  singularity exec --cleanenv "${SIF}" bash -lc "
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    if [ -f \"\$HOME/.fastdds_unicast_runtime.xml\" ]; then
+      export FASTDDS_DEFAULT_PROFILES_FILE=\"\$HOME/.fastdds_unicast_runtime.xml\"
+      export FASTRTPS_DEFAULT_PROFILES_FILE=\"\$HOME/.fastdds_unicast_runtime.xml\"
+    fi
+    ros2 topic pub --once ${topic} std_msgs/msg/Empty '{}'
+  "
 }
 
 

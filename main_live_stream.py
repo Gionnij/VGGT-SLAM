@@ -8,6 +8,7 @@ import signal
 import threading
 import tempfile
 import shutil
+import json
 from collections import deque
 from queue import Queue, Empty as QueueEmpty
 from dataclasses import dataclass
@@ -49,6 +50,170 @@ class Frame:
     K: np.ndarray             # 3x3 intrinsics
 
 
+def _mkdir(p: Path) -> Path:
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _now_tag() -> str:
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _softmax_np(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    x = x - np.max(x, axis=axis, keepdims=True)
+    ex = np.exp(x)
+    return ex / np.clip(np.sum(ex, axis=axis, keepdims=True), 1e-8, None)
+
+
+def _palette_bgr(n: int = 2048) -> np.ndarray:
+    idx = np.arange(n, dtype=np.uint32)
+    b = (idx * 37 + 17) % 255
+    g = (idx * 73 + 29) % 255
+    r = (idx * 109 + 53) % 255
+    return np.stack([b, g, r], axis=1).astype(np.uint8)
+
+
+def _depth_to_vis(depth: np.ndarray) -> np.ndarray:
+    d = depth.astype(np.float32)
+    valid = np.isfinite(d) & (d > 0)
+    out = np.zeros((*d.shape, 3), dtype=np.uint8)
+    if not np.any(valid):
+        return out
+    vals = d[valid]
+    lo = float(np.percentile(vals, 2))
+    hi = float(np.percentile(vals, 98))
+    if hi <= lo:
+        hi = lo + 1e-3
+    dn = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
+    dn_u8 = (dn * 255.0).astype(np.uint8)
+    out = cv2.applyColorMap(dn_u8, cv2.COLORMAP_TURBO)
+    out[~valid] = 0
+    return out
+
+
+def _sem_logits_to_mask_per_frame(
+    sem_mask_logits: np.ndarray,
+    sem_cls_logits: np.ndarray,
+    target_hw: tuple[int, int],
+    max_frames: int,
+) -> Optional[List[np.ndarray]]:
+    if sem_mask_logits is None or sem_cls_logits is None:
+        return None
+    sm = np.asarray(sem_mask_logits)
+    sc = np.asarray(sem_cls_logits)
+    if sm.ndim == 3:
+        sm = sm[None, ...]
+    if sc.ndim == 2:
+        sc = sc[None, ...]
+    if sm.ndim != 4 or sc.ndim != 3:
+        return None
+
+    S = min(max_frames, sm.shape[0], sc.shape[0])
+    if S <= 0:
+        return None
+    sm = sm[:S]
+    sc = sc[:S]
+    if sc.shape[-1] > 1:
+        sc = sc[..., :-1]  # drop no-object class
+    cls = _softmax_np(sc, axis=-1)
+    mask_prob = 1.0 / (1.0 + np.exp(-sm))
+    dense = np.einsum("sqc,sqhw->schw", cls, mask_prob)
+    pred = np.argmax(dense, axis=1).astype(np.uint16)  # (S,H,W)
+
+    th, tw = target_hw
+    out = []
+    for i in range(S):
+        m = pred[i]
+        if m.shape != (th, tw):
+            m = cv2.resize(m, (tw, th), interpolation=cv2.INTER_NEAREST).astype(np.uint16)
+        out.append(m)
+    return out
+
+
+class DemoExporter:
+    def __init__(self, root: str):
+        base = Path(root).expanduser()
+        self.run_dir = _mkdir(base / f"demo_{_now_tag()}")
+        self.rgb_dir = _mkdir(self.run_dir / "rgb")
+        self.depth_npz_dir = _mkdir(self.run_dir / "depth_maps")
+        self.depth_vis_dir = _mkdir(self.run_dir / "depth_maps_vis")
+        self.mask_dir = _mkdir(self.run_dir / "segmentation_masks")
+        self.overlay_dir = _mkdir(self.run_dir / "segmentation_overlays")
+        self.saved_seq: set[int] = set()
+        self.palette = _palette_bgr()
+        self.num_saved = 0
+        print(f"[DEMO] Saving run artifacts to: {self.run_dir}")
+
+    def export_batch(self, frames: List[Frame], frame_ids_window: List[str], predictions: dict) -> None:
+        if not frames:
+            return
+
+        n = len(frames)
+        depth = predictions.get("depth")
+        depth_conf = predictions.get("depth_conf")
+        sem_masks = predictions.get("sem_mask_logits")
+        sem_cls = predictions.get("sem_cls_logits")
+
+        h0, w0 = frames[0].img.shape[:2]
+        sem_per_frame = _sem_logits_to_mask_per_frame(sem_masks, sem_cls, target_hw=(h0, w0), max_frames=n)
+
+        depth_arr = np.asarray(depth) if depth is not None else None
+        depth_conf_arr = np.asarray(depth_conf) if depth_conf is not None else None
+        if depth_arr is not None:
+            if depth_arr.ndim == 4 and depth_arr.shape[-1] == 1:
+                depth_arr = depth_arr[..., 0]
+            elif depth_arr.ndim != 3:
+                depth_arr = None
+
+        for i, fr in enumerate(frames):
+            if fr.seq in self.saved_seq:
+                continue
+            self.saved_seq.add(fr.seq)
+
+            stem = Path(frame_ids_window[i]).stem if i < len(frame_ids_window) else f"seq_{fr.seq:08d}"
+            cv2.imwrite(str(self.rgb_dir / f"{stem}.jpg"), fr.img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+            if depth_arr is not None and i < depth_arr.shape[0]:
+                d = depth_arr[i].astype(np.float32)
+                conf = None
+                if depth_conf_arr is not None and depth_conf_arr.ndim >= 3 and i < depth_conf_arr.shape[0]:
+                    conf = depth_conf_arr[i].astype(np.float32)
+                np.savez_compressed(self.depth_npz_dir / f"{stem}.npz", depth=d, confidence=conf)
+                cv2.imwrite(str(self.depth_vis_dir / f"{stem}.png"), _depth_to_vis(d))
+
+            if sem_per_frame is not None and i < len(sem_per_frame):
+                m = sem_per_frame[i]
+                cv2.imwrite(str(self.mask_dir / f"{stem}.png"), m.astype(np.uint16))
+                color = self.palette[(m.astype(np.int64) % len(self.palette))]
+                overlay = cv2.addWeighted(fr.img, 0.5, color, 0.5, 0.0)
+                cv2.imwrite(str(self.overlay_dir / f"{stem}.png"), overlay)
+
+            self.num_saved += 1
+
+    def finalize(self, solver: Solver) -> None:
+        if solver.map.get_num_submaps() == 0:
+            (self.run_dir / "run_meta.json").write_text(
+                json.dumps({"saved_frames": self.num_saved, "run_dir": str(self.run_dir), "note": "No submaps created"}, indent=2)
+            )
+            print(f"[DEMO] No submaps created; only frame-level artifacts were saved in {self.run_dir}")
+            return
+
+        pcd_path = self.run_dir / "fused_pointcloud.pcd"
+        framewise_dir = self.run_dir / "framewise_pointclouds"
+        solver.map.write_points_to_file(str(pcd_path))
+        solver.map.save_framewise_pointclouds(str(framewise_dir))
+
+        meta = {
+            "saved_frames": self.num_saved,
+            "run_dir": str(self.run_dir),
+            "fused_pointcloud": str(pcd_path),
+            "framewise_pointclouds_dir": str(framewise_dir),
+        }
+        (self.run_dir / "run_meta.json").write_text(json.dumps(meta, indent=2))
+        print(f"[DEMO] Saved fused point cloud: {pcd_path}")
+        print(f"[DEMO] Saved framewise point clouds/depth: {framewise_dir}")
+
+
 # ----------------- Utilities -------------------------
 def resize_to_approx_2mp(img: np.ndarray, long_side_cap: int = 1920) -> np.ndarray:
     """Resize keeping aspect ratio so that the long side <= long_side_cap (~2MP at 1920x1080)."""
@@ -74,6 +239,7 @@ class Ros2Ingest:
     def __init__(self,
                  topic_image: str,
                  topic_info: str,
+                 topic_stop: str,
                  out_queue: Queue,
                  frame_id_start: int = 0,
                  bgr_to_rgb: bool = False,
@@ -83,6 +249,7 @@ class Ros2Ingest:
         self._queue = out_queue
         self._topic_image = topic_image
         self._topic_info = topic_info
+        self._topic_stop = topic_stop
         self._seq = frame_id_start
         self._bridge = CvBridge()
         self._bgr_to_rgb = bgr_to_rgb
@@ -94,7 +261,7 @@ class Ros2Ingest:
 
         self._sub_info = self.node.create_subscription(CameraInfo, self._topic_info, self._on_info, 10)
         self._sub_img = self.node.create_subscription(Image, self._topic_image, self._on_image, 10)
-        self._sub_stop = self.node.create_subscription(StopMsg, '/stream/stop', self._on_stop, 10)
+        self._sub_stop = self.node.create_subscription(StopMsg, self._topic_stop, self._on_stop, 10)
         self._executor_thread = threading.Thread(target=self._spin, daemon=True)
 
     def start(self):
@@ -115,7 +282,7 @@ class Ros2Ingest:
 
     def _on_stop(self, _: StopMsg):
         if self._stop_event is not None:
-            self.node.get_logger().info("Received /stream/stop; stopping ingest…")
+            self.node.get_logger().info(f"Received {self._topic_stop}; stopping ingest…")
             self._stop_event.set()
 
     def _on_info(self, msg: CameraInfo):
@@ -179,6 +346,7 @@ parser.add_argument("--vis_point_size", type=float, default=0.003, help="Visuali
 parser.add_argument("--live", action="store_true", help="Enable live streaming mode via ROS 2")
 parser.add_argument("--ros_image_topic", type=str, default="/camera/image_color", help="ROS 2 image topic")
 parser.add_argument("--ros_info_topic", type=str, default="/camera/camera_info", help="ROS 2 CameraInfo topic")
+parser.add_argument("--ros_stop_topic", type=str, default="/stream/stop", help="ROS 2 stop topic (std_msgs/Empty)")
 parser.add_argument("--ros2_queue_size", type=int, default=60, help="Capacity of the ingest queue (frames)")
 parser.add_argument("--target_fps", type=float, default=2.0, help="Target processing frequency (Hz)")
 parser.add_argument("--window_size", type=int, default=15, help="Sliding window size for live processing")
@@ -187,6 +355,12 @@ parser.add_argument("--max_latency_s", type=float, default=1.0, help="Max accept
 parser.add_argument("--temp_dir", type=str, default="", help="Optional directory to buffer live frames as images (falls back to tmp or /dev/shm)")
 parser.add_argument("--local_model", type=str, default=os.path.expanduser("~/models/VGGT-1B/model.pt"),
                     help="Path to local VGGT weights to avoid internet download")
+parser.add_argument("--finetune-checkpoint", type=str, default=os.getenv("VGGT_FINETUNE_CKPT", ""),
+                    help="Optional fine-tuned checkpoint loaded on top of base VGGT weights")
+parser.add_argument("--demo-root", type=str, default=os.getenv("VGGT_DEMO_ROOT", ""),
+                    help="If set, save demo artifacts to this root folder")
+parser.add_argument("--max-live-steps", type=int, default=0,
+                    help="Auto-stop live run after N processed submaps (0 disables)")
 
 
 # ----------------- Temp writer shim -------------------
@@ -220,8 +394,15 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
     signal.signal(signal.SIGTERM, _sig_handler)
 
     frame_queue: Queue = Queue(maxsize=args.ros2_queue_size)
-    ros = Ros2Ingest(args.ros_image_topic, args.ros_info_topic, frame_queue, stop_event=stop_event)
+    ros = Ros2Ingest(
+        args.ros_image_topic,
+        args.ros_info_topic,
+        args.ros_stop_topic,
+        frame_queue,
+        stop_event=stop_event,
+    )
     ros.start()
+    demo = DemoExporter(args.demo_root) if args.demo_root else None
 
     base_tmp = args.temp_dir if args.temp_dir else ("/dev/shm" if os.path.exists("/dev/shm") else tempfile.gettempdir())
     tmp_dir = tempfile.mkdtemp(prefix="vggt_live_", dir=base_tmp)
@@ -299,6 +480,8 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 step_id=step_id,
                 frame_ids_window=frame_ids_window,
             )
+            if demo is not None:
+                demo.export_batch(list(window), frame_ids_window, predictions)
 
             solver.add_points(predictions)
             solver.graph.optimize()
@@ -316,6 +499,9 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 window.popleft()
 
             last_proc_wall = now
+            if args.max_live_steps > 0 and solver.map.get_num_submaps() >= args.max_live_steps:
+                print(f"[LIVE] Reached max_live_steps={args.max_live_steps}; stopping.")
+                stop_event.set()
 
             # Log compact JSON record once per live step
             if tapper is not None:
@@ -340,7 +526,10 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
             
             from move_results import archive_results
-            archive_results()
+            try:
+                archive_results()
+            except BaseException as exc:
+                print(f"[WARN] archive_results failed: {exc}")
 
         if args.plot_focal_lengths:
             colors = plt.cm.viridis(np.linspace(0, 1, len(data)))
@@ -350,6 +539,8 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 x = [i] * len(values)
                 plt.scatter(x, y, color=colors[i], label=f'List {i+1}')
             plt.xlabel("poses"); plt.ylabel("Focal lengths"); plt.grid(); plt.show()
+        if demo is not None:
+            demo.finalize(solver)
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
@@ -444,7 +635,10 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Opt
         if not args.skip_dense_log:
             solver.map.save_framewise_pointclouds(args.log_path.replace(".txt", "_logs"))
         from move_results import archive_results
-        archive_results()
+        try:
+            archive_results()
+        except BaseException as exc:
+            print(f"[WARN] archive_results failed: {exc}")
 
     if args.plot_focal_lengths:
         colors = plt.cm.viridis(np.linspace(0, 1, len(data)))
@@ -520,6 +714,30 @@ def main():
         if len(unexpected) > 10:
             print("  …")
 
+    if args.finetune_checkpoint:
+        if not os.path.exists(args.finetune_checkpoint):
+            raise FileNotFoundError(f"Fine-tuned checkpoint not found: {args.finetune_checkpoint}")
+        print(f"[FT] Loading fine-tuned checkpoint: {args.finetune_checkpoint}")
+        ft = torch.load(args.finetune_checkpoint, map_location="cpu")
+        if isinstance(ft, dict) and "state_dict" in ft and isinstance(ft["state_dict"], dict):
+            ft_state = ft["state_dict"]
+        elif isinstance(ft, dict) and "model" in ft and isinstance(ft["model"], dict):
+            ft_state = ft["model"]
+        elif isinstance(ft, dict):
+            ft_state = ft
+        else:
+            raise RuntimeError("Unsupported fine-tuned checkpoint format.")
+
+        remap = {}
+        for k, v in ft_state.items():
+            nk = k[7:] if isinstance(k, str) and k.startswith("module.") else k
+            remap[nk] = v
+
+        ft_missing, ft_unexpected = model.load_state_dict(remap, strict=False)
+        print(
+            f"[FT] load strict=False: missing={len(ft_missing)} unexpected={len(ft_unexpected)}"
+        )
+
     try:
         dh = getattr(model, "depth_head", None)
         if dh is not None and getattr(dh, "film_enabled", False):
@@ -538,12 +756,17 @@ def main():
 
     model = model.to(device)
     
-    # Attach taps right after model instantiation/eval
+    # Optional taps/tracing (disabled for plain VGGT runs).
+    enable_taps = str(os.getenv("VGGT_ENABLE_TAPS", "1")).strip().lower() not in ("0", "false", "no", "off")
     global tapper
-    tapper = attach_vggt_taps(model, logdir="tap_logs", capture_every=1)
-    install_trace_probes(model)
-
-    trace = TraceSink("tap_logs/trace.jsonl")
+    trace = None
+    if enable_taps:
+        tapper = attach_vggt_taps(model, logdir="tap_logs", capture_every=1)
+        install_trace_probes(model)
+        trace = TraceSink("tap_logs/trace.jsonl")
+    else:
+        tapper = None
+        print("[VGGT] Taps/tracing disabled (VGGT_ENABLE_TAPS=0)")
 
     if args.live:
         if args.overlapping_window_size != 1:

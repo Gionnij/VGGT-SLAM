@@ -82,11 +82,16 @@ class GraphMap:
                 poses = submap.get_all_poses_world(ignore_loop_closure_frames=True)
                 frame_ids = submap.get_frame_ids()
                 assert len(poses) == len(frame_ids), "Number of provided poses and number of frame ids do not match"
-                for frame_id, pose in zip(frame_ids, poses):
+                for local_idx, (frame_id, pose) in enumerate(zip(frame_ids, poses)):
                     x, y, z = pose[0:3, 3]
                     rotation_matrix = pose[0:3, 0:3]
                     quaternion = R.from_matrix(rotation_matrix).as_quat() # x, y, z, w
-                    output = np.array([float(frame_id), x, y, z, *quaternion])
+                    try:
+                        frame_value = float(frame_id)
+                    except Exception:
+                        # Fall back to monotonic index when frame IDs are non-numeric.
+                        frame_value = float(local_idx)
+                    output = np.array([frame_value, x, y, z, *quaternion])
                     f.write(" ".join(f"{v:.8f}" for v in output) + "\n")
 
     def save_framewise_pointclouds(self, file_name):

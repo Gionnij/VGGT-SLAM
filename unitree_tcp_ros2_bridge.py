@@ -73,6 +73,13 @@ class UnitreeTcpRos2Bridge(Node):
         fy: float,
         cx: float,
         cy: float,
+        k1: float,
+        k2: float,
+        p1: float,
+        p2: float,
+        k3: float,
+        undistort: bool,
+        undistort_alpha: float,
         stats_interval: float,
         save_every: int,
         save_dir: str,
@@ -94,11 +101,29 @@ class UnitreeTcpRos2Bridge(Node):
         self._fy = float(fy)
         self._cx = float(cx)
         self._cy = float(cy)
+        self._k1 = float(k1)
+        self._k2 = float(k2)
+        self._p1 = float(p1)
+        self._p2 = float(p2)
+        self._k3 = float(k3)
+        self._dist = np.array([self._k1, self._k2, self._p1, self._p2, self._k3], dtype=np.float64)
+        self._undistort = bool(undistort)
+        self._undistort_alpha = float(undistort_alpha)
+        self._map1: Optional[np.ndarray] = None
+        self._map2: Optional[np.ndarray] = None
+        self._map_hw: Optional[tuple[int, int]] = None
+        self._rect_k: Optional[np.ndarray] = None
         self._stats_interval = max(0.5, float(stats_interval))
         self._save_every = max(0, int(save_every))
         self._save_dir = save_dir.strip()
         if self._save_every > 0 and self._save_dir:
             os.makedirs(self._save_dir, exist_ok=True)
+
+        if self._undistort and self._fx <= 0:
+            self.get_logger().warn(
+                "Undistortion enabled without calibrated fx/fy/cx/cy. "
+                "Set --fx/--fy/--cx/--cy for meaningful rectification."
+            )
 
         self._image_pub = self.create_publisher(Image, image_topic, 10)
         self._info_pub = self.create_publisher(CameraInfo, info_topic, 10)
@@ -146,6 +171,42 @@ class UnitreeTcpRos2Bridge(Node):
         nh = max(1, int(round(h * s)))
         return cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
 
+    def _intrinsics_for_size(self, w: int, h: int) -> np.ndarray:
+        fx = self._fx if self._fx > 0 else float(max(w, h))
+        fy = self._fy if self._fy > 0 else float(max(w, h))
+        cx = self._cx if self._cx > 0 else float(w) / 2.0
+        cy = self._cy if self._cy > 0 else float(h) / 2.0
+        return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+    def _undistort_if_enabled(self, frame: np.ndarray, k_in: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if not self._undistort:
+            return frame, k_in
+
+        h, w = frame.shape[:2]
+        if self._map1 is None or self._map_hw != (w, h):
+            rect_k, _ = cv2.getOptimalNewCameraMatrix(
+                k_in,
+                self._dist,
+                (w, h),
+                alpha=self._undistort_alpha,
+                newImgSize=(w, h),
+            )
+            map1, map2 = cv2.initUndistortRectifyMap(
+                k_in,
+                self._dist,
+                None,
+                rect_k,
+                (w, h),
+                cv2.CV_16SC2,
+            )
+            self._map1 = map1
+            self._map2 = map2
+            self._rect_k = rect_k
+            self._map_hw = (w, h)
+
+        frame_ud = cv2.remap(frame, self._map1, self._map2, interpolation=cv2.INTER_LINEAR)
+        return frame_ud, self._rect_k if self._rect_k is not None else k_in
+
     def _receiver_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -186,6 +247,9 @@ class UnitreeTcpRos2Bridge(Node):
             self.get_logger().warn("JPEG decode failed for received frame")
             return
         frame = self._resize_if_needed(frame)
+        h, w = frame.shape[:2]
+        k_in = self._intrinsics_for_size(w, h)
+        frame, k_pub = self._undistort_if_enabled(frame, k_in)
 
         stamp = self.get_clock().now().to_msg()
 
@@ -196,17 +260,17 @@ class UnitreeTcpRos2Bridge(Node):
 
         h, w = frame.shape[:2]
         self._last_hw = (w, h)
-        fx = self._fx if self._fx > 0 else float(max(w, h))
-        fy = self._fy if self._fy > 0 else float(max(w, h))
-        cx = self._cx if self._cx > 0 else float(w) / 2.0
-        cy = self._cy if self._cy > 0 else float(h) / 2.0
+        fx = float(k_pub[0, 0])
+        fy = float(k_pub[1, 1])
+        cx = float(k_pub[0, 2])
+        cy = float(k_pub[1, 2])
         info = CameraInfo()
         info.header.stamp = stamp
         info.header.frame_id = self._frame_id
         info.width = int(w)
         info.height = int(h)
         info.distortion_model = "plumb_bob"
-        info.d = []
+        info.d = [0.0, 0.0, 0.0, 0.0, 0.0] if self._undistort else self._dist.tolist()
         info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
         info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
         self._info_pub.publish(info)
@@ -216,7 +280,14 @@ class UnitreeTcpRos2Bridge(Node):
             cmsg.header.stamp = stamp
             cmsg.header.frame_id = self._frame_id
             cmsg.format = "jpeg"
-            cmsg.data = jpeg_for_compressed
+            if self._undistort:
+                ok, enc = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                if not ok:
+                    self.get_logger().warn("Failed to JPEG-encode undistorted frame")
+                    return
+                cmsg.data = enc.tobytes()
+            else:
+                cmsg.data = jpeg_for_compressed
             self._compressed_pub.publish(cmsg)
 
         self._last_pub_seq = seq
@@ -278,6 +349,13 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--fy", type=float, default=-1.0, help="Camera fy (<=0 uses fallback)")
     p.add_argument("--cx", type=float, default=-1.0, help="Camera cx (<=0 uses image center)")
     p.add_argument("--cy", type=float, default=-1.0, help="Camera cy (<=0 uses image center)")
+    p.add_argument("--k1", type=float, default=0.0, help="Radial distortion k1")
+    p.add_argument("--k2", type=float, default=0.0, help="Radial distortion k2")
+    p.add_argument("--p1", type=float, default=0.0, help="Tangential distortion p1")
+    p.add_argument("--p2", type=float, default=0.0, help="Tangential distortion p2")
+    p.add_argument("--k3", type=float, default=0.0, help="Radial distortion k3")
+    p.add_argument("--undistort", action="store_true", help="Apply undistortion to published images")
+    p.add_argument("--undistort-alpha", type=float, default=0.0, help="Undistort crop alpha in [0,1]")
     p.add_argument("--stats-interval", type=float, default=5.0, help="Seconds between fps stats logs")
     p.add_argument("--save-every", type=int, default=0, help="Save one decoded frame every N published frames")
     p.add_argument("--save-dir", default="", help="Directory for saved sample frames")
@@ -305,6 +383,13 @@ def main() -> None:
         fy=args.fy,
         cx=args.cx,
         cy=args.cy,
+        k1=args.k1,
+        k2=args.k2,
+        p1=args.p1,
+        p2=args.p2,
+        k3=args.k3,
+        undistort=args.undistort,
+        undistort_alpha=args.undistort_alpha,
         stats_interval=args.stats_interval,
         save_every=args.save_every,
         save_dir=args.save_dir,
