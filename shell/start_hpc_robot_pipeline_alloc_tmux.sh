@@ -165,6 +165,10 @@ tmux new-session -d -s "${SESSION_NAME}" -n cpu-tunnel "bash '${RUN_DIR}/cpu_tun
 tmux new-window  -t "${SESSION_NAME}" -n cpu-bridge "bash '${RUN_DIR}/cpu_bridge.sh'"
 tmux new-window  -t "${SESSION_NAME}" -n gpu-pipeline "bash '${RUN_DIR}/gpu_pipeline.sh'"
 
+# Keep panes/windows visible when a command exits so failures are inspectable
+# and windows don't silently disappear.
+tmux set-option -t "${SESSION_NAME}" remain-on-exit on
+
 tmux select-window -t "${SESSION_NAME}:gpu-pipeline"
 
 echo "[start_hpc_robot_pipeline_alloc_tmux] Session '${SESSION_NAME}' started."
