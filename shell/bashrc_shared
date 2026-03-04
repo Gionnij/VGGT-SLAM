@@ -426,7 +426,7 @@ stop_vggt_ingest () {
 # Launch full robot->HPC pipeline with auto Slurm allocations in a tmux session.
 # Usage: start_robot_pipeline_tmux [args...]
 start_robot_pipeline_tmux () {
-  "${VGGT_SLAM_ROOT}/shell/start_hpc_robot_pipeline_alloc_tmux.sh" "$@"
+  bash "${VGGT_SLAM_ROOT}/shell/start_hpc_robot_pipeline_alloc_tmux.sh" "$@"
 }
 
 
