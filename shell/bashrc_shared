@@ -229,7 +229,7 @@ hpc_gpu_state_file () {
 hpc_record_gpu_state () {
   local node ip file
   node="$(hostname -s 2>/dev/null || hostname)"
-  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print \"127.0.0.1\" }')"
+  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')"
   file="$(hpc_gpu_state_file)"
   cat > "${file}" <<EOF
 GPU_NODE=${node}
@@ -268,7 +268,7 @@ hpc_head_bridge () {
   fi
 
   local head_ip
-  head_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print \"130.89.6.254\" }')"
+  head_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print "130.89.6.254" }')"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>

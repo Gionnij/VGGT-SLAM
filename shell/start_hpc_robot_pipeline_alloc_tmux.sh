@@ -126,7 +126,7 @@ echo "[cpu-tunnel] requesting CPU node..."
 sinteractive --partition=main --mem=40G --time=24:00:00 bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
-  echo "[cpu-tunnel] allocation granted on: \\$(hostname)"
+  echo "[cpu-tunnel] allocation granted on: \$(hostname)"
   hpc_robot_stream_tunnel "${LOCAL_PORT}" "${HEAD_PORT}"
 '
 SCRIPT
@@ -139,7 +139,7 @@ echo "[cpu-bridge] requesting CPU node..."
 sinteractive --partition=main --mem=40G --time=24:00:00 bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
-  echo "[cpu-bridge] allocation granted on: \\$(hostname)"
+  echo "[cpu-bridge] allocation granted on: \$(hostname)"
   export HPC_ROBOT_STATS_INTERVAL="${STATS_INTERVAL}"
   hpc_robot_bridge 127.0.0.1 "${LOCAL_PORT}" "${FPS}"
 '
@@ -153,7 +153,7 @@ echo "[gpu-pipeline] requesting GPU node..."
 sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00 bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
-  echo "[gpu-pipeline] allocation granted on: \\$(hostname)"
+  echo "[gpu-pipeline] allocation granted on: \$(hostname)"
   export VGGT_FINETUNE_CKPT="${CHECKPOINT}"
   export VGGT_DEMO_ROOT="${DEMO_ROOT}"
   export VGGT_LOG_RESULTS="${LOG_RESULTS}"

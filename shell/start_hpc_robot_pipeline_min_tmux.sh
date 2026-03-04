@@ -129,7 +129,7 @@ echo "[gpu-pipeline] requesting GPU node..."
 sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00 bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
-  echo "[gpu-pipeline] allocation granted on: \\$(hostname)"
+  echo "[gpu-pipeline] allocation granted on: \$(hostname)"
   hpc_record_gpu_state
   export VGGT_FINETUNE_CKPT="${CHECKPOINT}"
   export VGGT_DEMO_ROOT="${DEMO_ROOT}"
