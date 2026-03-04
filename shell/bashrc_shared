@@ -142,10 +142,22 @@ hpc_robot_stream_tunnel () {
   local head_port="${2:-5001}"
   local head_host="${HPC_HEAD_HOST:-hpc-head1.ewi.utwente.nl}"
   local head_user="${HPC_HEAD_USER:-$USER}"
+  local head_key="${HPC_HEAD_SSH_KEY:-}"
+  local ssh_opts="${HPC_HEAD_SSH_OPTS:- -o IdentitiesOnly=yes -o IdentityAgent=none -o ServerAliveInterval=30 -o ServerAliveCountMax=3}"
+
+  local key_arg=()
+  if [ -n "${head_key}" ]; then
+    key_arg=( -i "${head_key}" )
+  elif [ -f "${HOME}/.ssh/id_ed25519" ]; then
+    key_arg=( -i "${HOME}/.ssh/id_ed25519" )
+  elif [ -f "${HOME}/.ssh/id_rsa" ]; then
+    key_arg=( -i "${HOME}/.ssh/id_rsa" )
+  fi
 
   echo "[hpc_robot_stream_tunnel] Forwarding 127.0.0.1:${local_port} -> ${head_host}:127.0.0.1:${head_port}"
   echo "[hpc_robot_stream_tunnel] Keep this terminal open; Ctrl+C to stop."
-  ssh -N -L "127.0.0.1:${local_port}:127.0.0.1:${head_port}" "${head_user}@${head_host}"
+  # shellcheck disable=SC2086
+  ssh ${ssh_opts} "${key_arg[@]}" -N -L "127.0.0.1:${local_port}:127.0.0.1:${head_port}" "${head_user}@${head_host}"
 }
 
 # Run TCP->ROS2 bridge on HPC (typically GPU node) using run_vggt-compatible topics.
@@ -206,6 +218,86 @@ hpc_robot_bridge () {
       --save-dir ${save_dir} \
       ${undistort_args}
   "
+}
+
+# Shared state file used by head/compute scripts to exchange active GPU endpoint info.
+hpc_gpu_state_file () {
+  echo "${VGGT_GPU_STATE_FILE:-$HOME/.vggt_active_gpu.env}"
+}
+
+# Record current node identity/IP so head-side services can target it.
+hpc_record_gpu_state () {
+  local node ip file
+  node="$(hostname -s 2>/dev/null || hostname)"
+  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print \"127.0.0.1\" }')"
+  file="$(hpc_gpu_state_file)"
+  cat > "${file}" <<EOF
+GPU_NODE=${node}
+GPU_IP=${ip}
+UPDATED_AT=$(date +%s)
+EOF
+  echo "[hpc_record_gpu_state] ${node} (${ip}) -> ${file}"
+}
+
+# Run bridge on head node and configure FastDDS unicast peer using the latest GPU state file.
+# Usage: hpc_head_bridge [head_port] [fps]
+hpc_head_bridge () {
+  local head_port="${1:-5001}"
+  local fps="${2:-2.0}"
+  local wait_s="${HPC_GPU_STATE_WAIT_SEC:-600}"
+  local poll_s="${HPC_GPU_STATE_POLL_SEC:-2}"
+  local state_file
+  state_file="$(hpc_gpu_state_file)"
+
+  local elapsed=0
+  while [ ! -f "${state_file}" ]; do
+    if [ "${elapsed}" -ge "${wait_s}" ]; then
+      echo "[hpc_head_bridge] Timed out waiting for GPU state file: ${state_file}" >&2
+      return 1
+    fi
+    echo "[hpc_head_bridge] Waiting for GPU state file (${elapsed}s/${wait_s}s): ${state_file}"
+    sleep "${poll_s}"
+    elapsed=$((elapsed + poll_s))
+  done
+
+  # shellcheck disable=SC1090
+  source "${state_file}"
+  if [ -z "${GPU_IP:-}" ]; then
+    echo "[hpc_head_bridge] Missing GPU_IP in ${state_file}" >&2
+    return 1
+  fi
+
+  local head_ip
+  head_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print \"130.89.6.254\" }')"
+
+  cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="unicast_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>udp_only</transport_id></userTransports>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>${head_ip}</address></udpv4></locator>
+          <locator><udpv4><address>${GPU_IP}</address></udpv4></locator>
+        </initialPeersList>
+        <avoid_builtin_multicast>true</avoid_builtin_multicast>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+
+  echo "[hpc_head_bridge] Using GPU peer ${GPU_IP} (node=${GPU_NODE:-unknown})"
+  export HPC_BRIDGE_USE_FASTDDS_XML=1
+  hpc_robot_bridge 127.0.0.1 "${head_port}" "${fps}"
 }
 
 # --- ScanNet++ GPU env setup ---
@@ -426,6 +518,12 @@ stop_vggt_ingest () {
 # Launch full robot->HPC pipeline with auto Slurm allocations in a tmux session.
 # Usage: start_robot_pipeline_tmux [args...]
 start_robot_pipeline_tmux () {
+  bash "${VGGT_SLAM_ROOT}/shell/start_hpc_robot_pipeline_min_tmux.sh" "$@"
+}
+
+# Legacy 3-window launcher (cpu-tunnel + cpu-bridge + gpu-pipeline).
+# Usage: start_robot_pipeline_alloc_tmux [args...]
+start_robot_pipeline_alloc_tmux () {
   bash "${VGGT_SLAM_ROOT}/shell/start_hpc_robot_pipeline_alloc_tmux.sh" "$@"
 }
 
