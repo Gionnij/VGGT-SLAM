@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH -J film_m2f_train
 #SBATCH --gres=gpu:1
-#SBATCH --constraint="a100|a40"
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=40G
 #SBATCH --time=24:00:00
