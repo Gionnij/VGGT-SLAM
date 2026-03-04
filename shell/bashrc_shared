@@ -423,6 +423,12 @@ stop_vggt_ingest () {
   "
 }
 
+# Launch full robot->HPC pipeline with auto Slurm allocations in a tmux session.
+# Usage: start_robot_pipeline_tmux [args...]
+start_robot_pipeline_tmux () {
+  "${VGGT_SLAM_ROOT}/shell/start_hpc_robot_pipeline_alloc_tmux.sh" "$@"
+}
+
 
 gpu_node_env () {
   if command -v module >/dev/null 2>&1; then
