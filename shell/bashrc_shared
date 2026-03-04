@@ -97,6 +97,94 @@ pub_images () {
   "
 }
 
+# Start Fast DDS Discovery Server on HPC (run on head/login node).
+# Usage: dds_server_hpc [port]
+dds_server_hpc () {
+  local port="${1:-11811}"
+  echo "[dds_server_hpc] Starting discovery server on UDP ${port}"
+  fastdds discovery -i 0 -l 0.0.0.0 -p "${port}"
+}
+
+# Start Unitree robot camera ROS2 publisher over SSH using run_vggt-compatible topics.
+# Usage: pub_robot_cam [robot_host] [robot_iface] [fps]
+pub_robot_cam () {
+  local robot_host="${1:-192.168.225.122}"
+  local robot_iface="${2:-eth0}"
+  local fps="${3:-2.0}"
+  local hpc_head_ip="${HPC_HEAD_IP:-130.89.6.254}"
+  local dds_port="${HPC_DDS_PORT:-11811}"
+
+  echo "[pub_robot_cam] robot=${robot_host} iface=${robot_iface} fps=${fps}"
+  echo "[pub_robot_cam] using discovery server ${hpc_head_ip}:${dds_port}"
+
+  ssh "unitree@${robot_host}" "
+    set -e
+    source ~/venvs/unitree_sdk2/bin/activate
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_DOMAIN_ID=42
+    export ROS_LOCALHOST_ONLY=0
+    export ROS_DISCOVERY_SERVER=${hpc_head_ip}:${dds_port}
+    python3 ~/Workspace/gio_ws/unitree_robot_ros2_publisher.py \
+      --interface ${robot_iface} \
+      --fps ${fps} \
+      --reliability best_effort \
+      --max-width 960 \
+      --max-height 540 \
+      --image-topic /camera/image_color \
+      --info-topic /camera/camera_info
+  "
+}
+
+# Pull robot reverse-tunneled TCP stream from HPC head to this node (typically GPU node).
+# Usage: hpc_robot_stream_tunnel [local_port] [head_port]
+hpc_robot_stream_tunnel () {
+  local local_port="${1:-5001}"
+  local head_port="${2:-5001}"
+  local head_host="${HPC_HEAD_HOST:-hpc-head1.ewi.utwente.nl}"
+  local head_user="${HPC_HEAD_USER:-$USER}"
+
+  echo "[hpc_robot_stream_tunnel] Forwarding 127.0.0.1:${local_port} -> ${head_host}:127.0.0.1:${head_port}"
+  echo "[hpc_robot_stream_tunnel] Keep this terminal open; Ctrl+C to stop."
+  ssh -N -L "127.0.0.1:${local_port}:127.0.0.1:${head_port}" "${head_user}@${head_host}"
+}
+
+# Run TCP->ROS2 bridge on HPC (typically GPU node) using run_vggt-compatible topics.
+# Usage: hpc_robot_bridge [tcp_host] [tcp_port] [fps]
+hpc_robot_bridge () {
+  cleanenv 2>/dev/null || true
+  if command -v module >/dev/null 2>&1; then
+    module load singularity/3.9.5 2>/dev/null || true
+  fi
+
+  local tcp_host="${1:-127.0.0.1}"
+  local tcp_port="${2:-5001}"
+  local fps="${3:-2.0}"
+  local SIF="${HOME}/containers/ros_humble_perception.sif"
+
+  singularity exec --cleanenv "${SIF}" bash -lc "
+    set -eE -o pipefail
+    set +u; source /opt/ros/humble/setup.bash; set -u
+
+    export ROS_DOMAIN_ID=42
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_LOCALHOST_ONLY=0
+    if [ -f \"\$HOME/.fastdds_unicast_runtime.xml\" ]; then
+      export FASTDDS_DEFAULT_PROFILES_FILE=\"\$HOME/.fastdds_unicast_runtime.xml\"
+      export FASTRTPS_DEFAULT_PROFILES_FILE=\"\$HOME/.fastdds_unicast_runtime.xml\"
+    fi
+
+    python3 ${VGGT_SLAM_ROOT}/unitree_tcp_ros2_bridge.py \
+      --robot-ip ${tcp_host} \
+      --port ${tcp_port} \
+      --fps ${fps} \
+      --image-topic /camera/image_color \
+      --info-topic /camera/camera_info \
+      --frame-id camera \
+      --max-width 960 \
+      --max-height 540
+  "
+}
+
 # --- ScanNet++ GPU env setup ---
 scannetpp_env () {
   if [ -n "${VIRTUAL_ENV:-}" ] && command -v deactivate >/dev/null 2>&1; then
@@ -141,6 +229,8 @@ run_vggt () {
 
   GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
   CPU_IP="130.89.6.254"
+  local USE_DDS_SERVER="${USE_DDS_SERVER:-0}"
+  local DDS_SERVER_ADDR="${ROS_DISCOVERY_SERVER:-${CPU_IP}:11811}"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -184,6 +274,10 @@ EOF
     export ROS_LOCALHOST_ONLY=0
     export FASTDDS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
     export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.fastdds_unicast_runtime.xml"
+    if [ "'"${USE_DDS_SERVER}"'" = "1" ]; then
+      export ROS_DISCOVERY_SERVER="'"${DDS_SERVER_ADDR}"'"
+      echo "[run_vggt] Discovery server: ${ROS_DISCOVERY_SERVER}"
+    fi
 
     export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:$PYTHONPATH"
 
