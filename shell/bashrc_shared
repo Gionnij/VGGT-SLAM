@@ -159,6 +159,10 @@ hpc_robot_bridge () {
   local tcp_host="${1:-127.0.0.1}"
   local tcp_port="${2:-5001}"
   local fps="${3:-2.0}"
+  local stats_interval="${HPC_ROBOT_STATS_INTERVAL:-5.0}"
+  local save_every="${HPC_ROBOT_SAVE_EVERY:-0}"
+  local save_dir="${HPC_ROBOT_SAVE_DIR:-$HOME/src/VGGT-SLAM/robot_probe_frames}"
+  local use_fastdds_xml="${HPC_BRIDGE_USE_FASTDDS_XML:-0}"
   local SIF="${HOME}/containers/ros_humble_perception.sif"
 
   singularity exec --cleanenv "${SIF}" bash -lc "
@@ -168,7 +172,7 @@ hpc_robot_bridge () {
     export ROS_DOMAIN_ID=42
     export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
     export ROS_LOCALHOST_ONLY=0
-    if [ -f \"\$HOME/.fastdds_unicast_runtime.xml\" ]; then
+    if [ \"${use_fastdds_xml}\" = \"1\" ] && [ -f \"\$HOME/.fastdds_unicast_runtime.xml\" ]; then
       export FASTDDS_DEFAULT_PROFILES_FILE=\"\$HOME/.fastdds_unicast_runtime.xml\"
       export FASTRTPS_DEFAULT_PROFILES_FILE=\"\$HOME/.fastdds_unicast_runtime.xml\"
     fi
@@ -181,7 +185,10 @@ hpc_robot_bridge () {
       --info-topic /camera/camera_info \
       --frame-id camera \
       --max-width 960 \
-      --max-height 540
+      --max-height 540 \
+      --stats-interval ${stats_interval} \
+      --save-every ${save_every} \
+      --save-dir ${save_dir}
   "
 }
 
@@ -227,7 +234,13 @@ run_vggt () {
     module load singularity/3.9.5 2>/dev/null || true
   fi
 
-  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
+  GPU_IP=$(hostname -I | tr " " "\n" | awk '
+    /^10[.]/ {print; found=1; exit}
+    { if ($0 != "") first=$0 }
+    END {
+      if (!found && first != "") print first
+      else if (!found) print "127.0.0.1"
+    }')
   CPU_IP="130.89.6.254"
   local USE_DDS_SERVER="${USE_DDS_SERVER:-0}"
   local DDS_SERVER_ADDR="${ROS_DISCOVERY_SERVER:-${CPU_IP}:11811}"

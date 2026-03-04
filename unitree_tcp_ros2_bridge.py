@@ -9,6 +9,7 @@ Expected robot-side protocol per frame:
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import struct
 import threading
@@ -35,6 +36,26 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
+def decode_jpeg_resilient(payload: bytes) -> tuple[Optional[np.ndarray], bytes]:
+    """Decode JPEG payload and recover from occasional framing garbage."""
+    np_buf = np.frombuffer(payload, dtype=np.uint8)
+    frame = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
+    if frame is not None:
+        return frame, payload
+
+    # Some streams occasionally carry bytes before/after JPEG SOI/EOI markers.
+    soi = payload.find(b"\xff\xd8")
+    eoi = payload.rfind(b"\xff\xd9")
+    if soi >= 0 and eoi > soi:
+        cleaned = payload[soi : eoi + 2]
+        np_buf = np.frombuffer(cleaned, dtype=np.uint8)
+        frame = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
+        if frame is not None:
+            return frame, cleaned
+
+    return None, payload
+
+
 class UnitreeTcpRos2Bridge(Node):
     def __init__(
         self,
@@ -52,6 +73,9 @@ class UnitreeTcpRos2Bridge(Node):
         fy: float,
         cx: float,
         cy: float,
+        stats_interval: float,
+        save_every: int,
+        save_dir: str,
         reconnect_sec: float,
     ):
         super().__init__("unitree_tcp_ros2_bridge")
@@ -70,6 +94,11 @@ class UnitreeTcpRos2Bridge(Node):
         self._fy = float(fy)
         self._cx = float(cx)
         self._cy = float(cy)
+        self._stats_interval = max(0.5, float(stats_interval))
+        self._save_every = max(0, int(save_every))
+        self._save_dir = save_dir.strip()
+        if self._save_every > 0 and self._save_dir:
+            os.makedirs(self._save_dir, exist_ok=True)
 
         self._image_pub = self.create_publisher(Image, image_topic, 10)
         self._info_pub = self.create_publisher(CameraInfo, info_topic, 10)
@@ -87,11 +116,16 @@ class UnitreeTcpRos2Bridge(Node):
         self._rx_count = 0
         self._pub_count = 0
         self._last_pub_seq: Optional[int] = None
+        self._last_stats_wall = time.time()
+        self._last_stats_rx = 0
+        self._last_stats_pub = 0
+        self._last_hw: Optional[tuple[int, int]] = None
 
         self._rx_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self._rx_thread.start()
 
         self._timer = self.create_timer(1.0 / fps, self._publish_tick)
+        self._stats_timer = self.create_timer(self._stats_interval, self._log_stats)
         self.get_logger().info(
             f"Receiving TCP stream from {self._robot_ip}:{self._port}, publishing "
             f"{image_topic} + {info_topic} at {fps:.2f} FPS"
@@ -147,8 +181,7 @@ class UnitreeTcpRos2Bridge(Node):
         if self._last_pub_seq is not None and seq == self._last_pub_seq:
             return
 
-        np_buf = np.frombuffer(jpeg, dtype=np.uint8)
-        frame = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
+        frame, jpeg_for_compressed = decode_jpeg_resilient(jpeg)
         if frame is None:
             self.get_logger().warn("JPEG decode failed for received frame")
             return
@@ -162,6 +195,7 @@ class UnitreeTcpRos2Bridge(Node):
         self._image_pub.publish(img_msg)
 
         h, w = frame.shape[:2]
+        self._last_hw = (w, h)
         fx = self._fx if self._fx > 0 else float(max(w, h))
         fy = self._fy if self._fy > 0 else float(max(w, h))
         cx = self._cx if self._cx > 0 else float(w) / 2.0
@@ -182,13 +216,40 @@ class UnitreeTcpRos2Bridge(Node):
             cmsg.header.stamp = stamp
             cmsg.header.frame_id = self._frame_id
             cmsg.format = "jpeg"
-            cmsg.data = jpeg
+            cmsg.data = jpeg_for_compressed
             self._compressed_pub.publish(cmsg)
 
         self._last_pub_seq = seq
         self._pub_count += 1
-        if self._pub_count % 20 == 0:
-            self.get_logger().info(f"Published {self._pub_count} frames (received {self._rx_count})")
+        if self._save_every > 0 and self._save_dir and (self._pub_count % self._save_every == 0):
+            out = os.path.join(self._save_dir, f"frame_{self._pub_count:06d}_{w}x{h}.jpg")
+            try:
+                cv2.imwrite(out, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            except Exception as exc:
+                self.get_logger().warn(f"Failed to save sample frame: {exc}")
+
+    def _log_stats(self) -> None:
+        now = time.time()
+        dt = now - self._last_stats_wall
+        if dt <= 0:
+            return
+
+        rx_delta = self._rx_count - self._last_stats_rx
+        pub_delta = self._pub_count - self._last_stats_pub
+        rx_fps = rx_delta / dt
+        pub_fps = pub_delta / dt
+        hw = self._last_hw
+        hw_txt = f"{hw[0]}x{hw[1]}" if hw else "n/a"
+
+        self.get_logger().info(
+            f"stats: rx_fps={rx_fps:.2f}, pub_fps={pub_fps:.2f}, "
+            f"totals(rx={self._rx_count}, pub={self._pub_count}), "
+            f"backlog={self._rx_count - self._pub_count}, hw={hw_txt}"
+        )
+
+        self._last_stats_wall = now
+        self._last_stats_rx = self._rx_count
+        self._last_stats_pub = self._pub_count
 
     def destroy_node(self) -> bool:
         self._stop.set()
@@ -217,6 +278,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--fy", type=float, default=-1.0, help="Camera fy (<=0 uses fallback)")
     p.add_argument("--cx", type=float, default=-1.0, help="Camera cx (<=0 uses image center)")
     p.add_argument("--cy", type=float, default=-1.0, help="Camera cy (<=0 uses image center)")
+    p.add_argument("--stats-interval", type=float, default=5.0, help="Seconds between fps stats logs")
+    p.add_argument("--save-every", type=int, default=0, help="Save one decoded frame every N published frames")
+    p.add_argument("--save-dir", default="", help="Directory for saved sample frames")
     p.add_argument("--reconnect-sec", type=float, default=1.0, help="Reconnect delay")
     args, ros_args = p.parse_known_args()
     return args, ros_args
@@ -241,6 +305,9 @@ def main() -> None:
         fy=args.fy,
         cx=args.cx,
         cy=args.cy,
+        stats_interval=args.stats_interval,
+        save_every=args.save_every,
+        save_dir=args.save_dir,
         reconnect_sec=args.reconnect_sec,
     )
 
