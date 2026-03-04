@@ -227,16 +227,18 @@ hpc_gpu_state_file () {
 
 # Record current node identity/IP so head-side services can target it.
 hpc_record_gpu_state () {
-  local node ip file
+  local node ip file run_id
   node="$(hostname -s 2>/dev/null || hostname)"
   ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')"
   file="$(hpc_gpu_state_file)"
+  run_id="${HPC_GPU_RUN_ID:-${VGGT_GPU_RUN_ID:-}}"
   cat > "${file}" <<EOF
 GPU_NODE=${node}
 GPU_IP=${ip}
+GPU_RUN_ID=${run_id}
 UPDATED_AT=$(date +%s)
 EOF
-  echo "[hpc_record_gpu_state] ${node} (${ip}) -> ${file}"
+  echo "[hpc_record_gpu_state] ${node} (${ip}) run_id=${run_id:-none} -> ${file}"
 }
 
 # Run bridge on head node and configure FastDDS unicast peer using the latest GPU state file.
@@ -246,26 +248,43 @@ hpc_head_bridge () {
   local fps="${2:-2.0}"
   local wait_s="${HPC_GPU_STATE_WAIT_SEC:-600}"
   local poll_s="${HPC_GPU_STATE_POLL_SEC:-2}"
+  local expected_run_id="${HPC_GPU_RUN_ID:-${VGGT_GPU_RUN_ID:-}}"
   local state_file
   state_file="$(hpc_gpu_state_file)"
 
   local elapsed=0
-  while [ ! -f "${state_file}" ]; do
-    if [ "${elapsed}" -ge "${wait_s}" ]; then
-      echo "[hpc_head_bridge] Timed out waiting for GPU state file: ${state_file}" >&2
-      return 1
+  while :; do
+    if [ ! -f "${state_file}" ]; then
+      if [ "${elapsed}" -ge "${wait_s}" ]; then
+        echo "[hpc_head_bridge] Timed out waiting for GPU state file: ${state_file}" >&2
+        return 1
+      fi
+      echo "[hpc_head_bridge] Waiting for GPU state file (${elapsed}s/${wait_s}s): ${state_file}"
+      sleep "${poll_s}"
+      elapsed=$((elapsed + poll_s))
+      continue
     fi
-    echo "[hpc_head_bridge] Waiting for GPU state file (${elapsed}s/${wait_s}s): ${state_file}"
-    sleep "${poll_s}"
-    elapsed=$((elapsed + poll_s))
-  done
 
-  # shellcheck disable=SC1090
-  source "${state_file}"
-  if [ -z "${GPU_IP:-}" ]; then
-    echo "[hpc_head_bridge] Missing GPU_IP in ${state_file}" >&2
-    return 1
-  fi
+    # shellcheck disable=SC1090
+    source "${state_file}"
+    if [ -z "${GPU_IP:-}" ]; then
+      echo "[hpc_head_bridge] Invalid state file (missing GPU_IP): ${state_file}" >&2
+      sleep "${poll_s}"
+      elapsed=$((elapsed + poll_s))
+      continue
+    fi
+    if [ -n "${expected_run_id}" ] && [ "${GPU_RUN_ID:-}" != "${expected_run_id}" ]; then
+      if [ "${elapsed}" -ge "${wait_s}" ]; then
+        echo "[hpc_head_bridge] Timed out waiting for matching run_id='${expected_run_id}' in ${state_file}" >&2
+        return 1
+      fi
+      echo "[hpc_head_bridge] Waiting for matching run_id='${expected_run_id}' (${elapsed}s/${wait_s}s). Current='${GPU_RUN_ID:-none}'"
+      sleep "${poll_s}"
+      elapsed=$((elapsed + poll_s))
+      continue
+    fi
+    break
+  done
 
   local head_ip
   head_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print "130.89.6.254" }')"
@@ -295,7 +314,7 @@ hpc_head_bridge () {
 </profiles>
 EOF
 
-  echo "[hpc_head_bridge] Using GPU peer ${GPU_IP} (node=${GPU_NODE:-unknown})"
+  echo "[hpc_head_bridge] Using GPU peer ${GPU_IP} (node=${GPU_NODE:-unknown}, run_id=${GPU_RUN_ID:-none})"
   export HPC_BRIDGE_USE_FASTDDS_XML=1
   hpc_robot_bridge 127.0.0.1 "${head_port}" "${fps}"
 }

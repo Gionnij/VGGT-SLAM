@@ -18,6 +18,8 @@ HEAD_PORT="${HEAD_PORT:-15001}"
 FPS="${FPS:-2.0}"
 ATTACH="1"
 FORCE_KILL="0"
+STATE_FILE="${VGGT_GPU_STATE_FILE:-${TMPDIR:-/tmp}/vggt_active_gpu_${SESSION_NAME}.env}"
+RUN_ID="${HPC_GPU_RUN_ID:-${SESSION_NAME}_$(date +%s)_$$}"
 
 CHECKPOINT="${VGGT_FINETUNE_CKPT:-}"
 DEMO_ROOT="${VGGT_DEMO_ROOT:-$HOME/src/VGGT-SLAM/demo}"
@@ -114,6 +116,7 @@ fi
 
 RUN_DIR="${TMPDIR:-/tmp}/vggt_alloc_tmux_${SESSION_NAME}_$$"
 mkdir -p "${RUN_DIR}"
+rm -f "${STATE_FILE}"
 
 # Make sure windows persist after process exit, even for very early failures.
 tmux set-option -g remain-on-exit on
@@ -139,6 +142,8 @@ echo "[cpu-bridge] requesting CPU node..."
 sinteractive --partition=main --mem=40G --time=24:00:00 bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
+  export VGGT_GPU_STATE_FILE="${STATE_FILE}"
+  export HPC_GPU_RUN_ID="${RUN_ID}"
   echo "[cpu-bridge] allocation granted on: \$(hostname)"
   export HPC_ROBOT_STATS_INTERVAL="${STATS_INTERVAL}"
   hpc_robot_bridge 127.0.0.1 "${LOCAL_PORT}" "${FPS}"
@@ -153,7 +158,10 @@ echo "[gpu-pipeline] requesting GPU node..."
 sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00 bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
+  export VGGT_GPU_STATE_FILE="${STATE_FILE}"
+  export HPC_GPU_RUN_ID="${RUN_ID}"
   echo "[gpu-pipeline] allocation granted on: \$(hostname)"
+  hpc_record_gpu_state
   export VGGT_FINETUNE_CKPT="${CHECKPOINT}"
   export VGGT_DEMO_ROOT="${DEMO_ROOT}"
   export VGGT_LOG_RESULTS="${LOG_RESULTS}"
@@ -177,6 +185,8 @@ echo "  windows: cpu-tunnel | cpu-bridge | gpu-pipeline"
 echo "  attach : tmux attach -t ${SESSION_NAME}"
 echo "  checkpoint: ${CHECKPOINT}"
 echo "  demo root : ${DEMO_ROOT}"
+echo "  state file: ${STATE_FILE}"
+echo "  run id   : ${RUN_ID}"
 
 if [[ "${ATTACH}" == "1" ]]; then
   exec tmux attach -t "${SESSION_NAME}"
