@@ -12,7 +12,8 @@ REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 BASHRC_SHARED="${REPO_ROOT}/shell/bashrc_shared"
 
 SESSION_NAME="${SESSION_NAME:-robot_pipeline}"
-LOCAL_PORT="${LOCAL_PORT:-5001}"
+# Use a local forwarding port that doesn't collide with robot reverse tunnel on head.
+LOCAL_PORT="${LOCAL_PORT:-15001}"
 HEAD_PORT="${HEAD_PORT:-5001}"
 FPS="${FPS:-2.0}"
 ATTACH="1"
@@ -114,6 +115,9 @@ fi
 RUN_DIR="${TMPDIR:-/tmp}/vggt_alloc_tmux_${SESSION_NAME}_$$"
 mkdir -p "${RUN_DIR}"
 
+# Make sure windows persist after process exit, even for very early failures.
+tmux set-option -g remain-on-exit on
+
 cat > "${RUN_DIR}/cpu_tunnel.sh" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
@@ -164,9 +168,6 @@ chmod +x "${RUN_DIR}/cpu_tunnel.sh" "${RUN_DIR}/cpu_bridge.sh" "${RUN_DIR}/gpu_p
 tmux new-session -d -s "${SESSION_NAME}" -n cpu-tunnel "bash '${RUN_DIR}/cpu_tunnel.sh'"
 tmux new-window  -t "${SESSION_NAME}" -n cpu-bridge "bash '${RUN_DIR}/cpu_bridge.sh'"
 tmux new-window  -t "${SESSION_NAME}" -n gpu-pipeline "bash '${RUN_DIR}/gpu_pipeline.sh'"
-
-# Keep panes/windows visible when a command exits so failures are inspectable
-# and windows don't silently disappear.
 tmux set-option -t "${SESSION_NAME}" remain-on-exit on
 
 tmux select-window -t "${SESSION_NAME}:gpu-pipeline"
