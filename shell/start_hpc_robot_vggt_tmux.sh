@@ -7,15 +7,15 @@ set -euo pipefail
 # 3) run_vggt
 #
 # Prereq on robot: reverse tunnel must be active, e.g.
-#   ssh -N -R 5001:127.0.0.1:5001 s2984792@hpc-head1.ewi.utwente.nl
+#   ssh -N -R 15001:127.0.0.1:5001 s2984792@hpc-head1.ewi.utwente.nl
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 BASHRC_SHARED="${REPO_ROOT}/shell/bashrc_shared"
 
 SESSION_NAME="${SESSION_NAME:-vggt_robot}"
-LOCAL_PORT="${LOCAL_PORT:-5001}"
-HEAD_PORT="${HEAD_PORT:-5001}"
+LOCAL_PORT="${LOCAL_PORT:-15001}"
+HEAD_PORT="${HEAD_PORT:-15001}"
 FPS="${FPS:-2.0}"
 ATTACH="1"
 FORCE_KILL="0"

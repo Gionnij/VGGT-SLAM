@@ -138,8 +138,8 @@ pub_robot_cam () {
 # Pull robot reverse-tunneled TCP stream from HPC head to this node (typically GPU node).
 # Usage: hpc_robot_stream_tunnel [local_port] [head_port]
 hpc_robot_stream_tunnel () {
-  local local_port="${1:-5001}"
-  local head_port="${2:-5001}"
+  local local_port="${1:-15001}"
+  local head_port="${2:-15001}"
   local head_host="${HPC_HEAD_HOST:-hpc-head1.ewi.utwente.nl}"
   local head_user="${HPC_HEAD_USER:-$USER}"
   local head_key="${HPC_HEAD_SSH_KEY:-}"
@@ -169,7 +169,7 @@ hpc_robot_bridge () {
   fi
 
   local tcp_host="${1:-127.0.0.1}"
-  local tcp_port="${2:-5001}"
+  local tcp_port="${2:-15001}"
   local fps="${3:-2.0}"
   local stats_interval="${HPC_ROBOT_STATS_INTERVAL:-5.0}"
   local save_every="${HPC_ROBOT_SAVE_EVERY:-0}"
@@ -242,7 +242,7 @@ EOF
 # Run bridge on head node and configure FastDDS unicast peer using the latest GPU state file.
 # Usage: hpc_head_bridge [head_port] [fps]
 hpc_head_bridge () {
-  local head_port="${1:-5001}"
+  local head_port="${1:-15001}"
   local fps="${2:-2.0}"
   local wait_s="${HPC_GPU_STATE_WAIT_SEC:-600}"
   local poll_s="${HPC_GPU_STATE_POLL_SEC:-2}"

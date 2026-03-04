@@ -11,7 +11,7 @@ REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 BASHRC_SHARED="${REPO_ROOT}/shell/bashrc_shared"
 
 SESSION_NAME="${SESSION_NAME:-robot_pipeline}"
-HEAD_PORT="${HEAD_PORT:-5001}"
+HEAD_PORT="${HEAD_PORT:-15001}"
 FPS="${FPS:-2.0}"
 ATTACH="1"
 FORCE_KILL="0"

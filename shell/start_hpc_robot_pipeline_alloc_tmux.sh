@@ -14,7 +14,7 @@ BASHRC_SHARED="${REPO_ROOT}/shell/bashrc_shared"
 SESSION_NAME="${SESSION_NAME:-robot_pipeline}"
 # Use a local forwarding port that doesn't collide with robot reverse tunnel on head.
 LOCAL_PORT="${LOCAL_PORT:-15001}"
-HEAD_PORT="${HEAD_PORT:-5001}"
+HEAD_PORT="${HEAD_PORT:-15001}"
 FPS="${FPS:-2.0}"
 ATTACH="1"
 FORCE_KILL="0"
