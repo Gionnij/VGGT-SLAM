@@ -480,6 +480,7 @@ _run_vggt_live_mode () {
   local ENABLE_TAPS="${VGGT_ENABLE_TAPS:-${default_enable_taps}}"
   local ENABLE_FILM="${VGGT_FUSE_FILM:-${default_enable_film}}"
   local ENABLE_SEM="${VGGT_SEMANTIC_HEAD:-${default_enable_sem}}"
+  local SEM_BACKEND="${VGGT_SEM_BACKEND:-fusion}"
   local SEM_CLASSES="${VGGT_SEM_CLASSES:-60}"
   local SEM_QUERIES="${VGGT_SEM_QUERIES:-100}"
   local ENABLE_PIPELINE_CHECK="${VGGT_PIPELINE_CHECK:-${default_pipeline_check}}"
@@ -542,6 +543,7 @@ EOF
 	    export VGGT_FUSE_FILM_TEST=1
 
 	    export VGGT_SEMANTIC_HEAD="'"${ENABLE_SEM}"'"
+	    export VGGT_SEM_BACKEND="'"${SEM_BACKEND}"'"
 	    export VGGT_SEM_CLASSES="'"${SEM_CLASSES}"'"
 	    export VGGT_SEM_QUERIES="'"${SEM_QUERIES}"'"
 
@@ -563,6 +565,7 @@ EOF
 	    [ -n "${VGGT_M2F_WEIGHTS:-}" ] && echo "[run_'"${mode}"'] Semantic weights: ${VGGT_M2F_WEIGHTS}"
 	    [ -n "${VGGT_DEMO_ROOT:-}" ] && echo "[run_'"${mode}"'] Demo root: ${VGGT_DEMO_ROOT}"
 	    echo "[run_'"${mode}"'] taps=${VGGT_ENABLE_TAPS} film=${VGGT_FUSE_FILM} sem=${VGGT_SEMANTIC_HEAD}"
+	    echo "[run_'"${mode}"'] sem_backend=${VGGT_SEM_BACKEND}"
 	    EXTRA_ARGS=""
 	    if [ "${VGGT_LOG_RESULTS}" = "1" ]; then
 	      EXTRA_ARGS="${EXTRA_ARGS} --log_results"
@@ -580,6 +583,7 @@ print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
 print("FiLM blend  :", os.getenv("VGGT_FUSE_FILM_BLEND"))
 print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
 print("Sem head    :", os.getenv("VGGT_SEMANTIC_HEAD"))
+print("Sem backend :", os.getenv("VGGT_SEM_BACKEND"))
 PY
 
 	    /venvs/vggt/bin/python "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \

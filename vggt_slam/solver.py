@@ -494,7 +494,10 @@ class Solver:
 
         # Optional semantic head sidecar (no effect if module/env absent)
         try:
-            from vggt.heads.semantic_runner import run_semantic_if_enabled
+            try:
+                from hiding_folder.semantic_runner import run_semantic_if_enabled
+            except Exception:
+                from vggt.heads.semantic_runner import run_semantic_if_enabled
             device = next(model.parameters()).device
             run_semantic_if_enabled(model, predictions, device)
             sem_masks = predictions.get("sem_mask_logits")
