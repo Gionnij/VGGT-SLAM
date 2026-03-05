@@ -355,7 +355,7 @@ parser.add_argument("--max_latency_s", type=float, default=1.0, help="Max accept
 parser.add_argument("--temp_dir", type=str, default="", help="Optional directory to buffer live frames as images (falls back to tmp or /dev/shm)")
 parser.add_argument("--local_model", type=str, default=os.path.expanduser("~/models/VGGT-1B/model.pt"),
                     help="Path to local VGGT weights to avoid internet download")
-parser.add_argument("--finetune-checkpoint", type=str, default=os.getenv("VGGT_FINETUNE_CKPT", ""),
+parser.add_argument("--finetune-checkpoint", type=str, default="",
                     help="Optional fine-tuned checkpoint loaded on top of base VGGT weights")
 parser.add_argument("--demo-root", type=str, default=os.getenv("VGGT_DEMO_ROOT", ""),
                     help="If set, save demo artifacts to this root folder")

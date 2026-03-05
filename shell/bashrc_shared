@@ -99,9 +99,10 @@ pub_images () {
 
 # Stream a local scene folder over Unitree-style TCP framing to mimic robot camera stream.
 # Usage:
-#   pub_images_tcp [scene_id] [fps] [port] [mode]
+#   pub_images_tcp [scene_id_or_folder] [fps] [port] [mode]
 # Examples:
 #   pub_images_tcp 1841a0b525 2.0 15001 loop
+#   pub_images_tcp /deepstore/datasets/itc/eos/scannetpp/data/1841a0b525/dslr/resized_undistorted_images 2.0 15001 loop
 #   pub_images_tcp 1841a0b525 2.0 15001 oneshot
 pub_images_tcp () {
   cleanenv 2>/dev/null || true
@@ -109,21 +110,27 @@ pub_images_tcp () {
     module load singularity/3.9.5 2>/dev/null || true
   fi
 
-  local scene_id="${1:-1841a0b525}"
+  local scene_or_folder="${1:-1841a0b525}"
   local fps="${2:-2.0}"
   local port="${3:-15001}"
   local mode="${4:-loop}"
   local bind_addr="${PUB_IMAGES_TCP_BIND:-127.0.0.1}"
-  local dataset_root="${PUB_IMAGES_DATASET_ROOT:-$HOME/src/VGGT-SLAM/dataset_ready}"
-  local folder="${dataset_root}/${scene_id}/images"
+  local dataset_root="${PUB_IMAGES_DATASET_ROOT:-/deepstore/datasets/itc/eos/scannetpp/data}"
+  local folder=""
   local sif="${HOME}/containers/ros_humble_perception.sif"
+
+  if [ -d "${scene_or_folder}" ]; then
+    folder="${scene_or_folder}"
+  else
+    folder="${dataset_root}/${scene_or_folder}/dslr/resized_undistorted_images"
+  fi
 
   local loop_flag=""
   if [ "${mode}" = "loop" ]; then
     loop_flag="--loop"
   fi
 
-  echo "[pub_images_tcp] scene=${scene_id} folder=${folder}"
+  echo "[pub_images_tcp] source=${scene_or_folder} folder=${folder}"
   echo "[pub_images_tcp] serving on ${bind_addr}:${port} at ${fps} FPS mode=${mode}"
 
   singularity exec --cleanenv "${sif}" bash -lc "
@@ -138,6 +145,27 @@ pub_images_tcp () {
       --quality 90 \
       ${loop_flag}
   "
+}
+
+# Run full pipeline with the standard fine-tuned semantic settings.
+# Usage:
+#   run_pipeline_ft <checkpoint_path> [sem_classes] [sem_queries]
+# Example:
+#   run_pipeline_ft /home/s2984792/src/VGGT-SLAM/runs/train_selected60_mean_ce_fusioninit/checkpoints/film_m2f_epoch0020_step00782260_20260305_074546.pt
+run_pipeline_ft () {
+  local ckpt="${1:-}"
+  local sem_classes="${2:-60}"
+  local sem_queries="${3:-100}"
+  if [ -z "${ckpt}" ]; then
+    echo "[run_pipeline_ft] Missing checkpoint path." >&2
+    echo "Usage: run_pipeline_ft <checkpoint_path> [sem_classes] [sem_queries]" >&2
+    return 1
+  fi
+  export VGGT_FINETUNE_CKPT="${ckpt}"
+  export VGGT_LOAD_BACKBONE_CKPT=0
+  export VGGT_SEM_CLASSES="${sem_classes}"
+  export VGGT_SEM_QUERIES="${sem_queries}"
+  run_pipeline
 }
 
 # Start Fast DDS Discovery Server on HPC (run on head/login node).
@@ -522,7 +550,11 @@ EOF
 	    export VGGT_DEMO_ROOT="'"${DEMO_ROOT}"'"
 	    export VGGT_STOP_TOPIC="'"${STOP_TOPIC}"'"
 	    export VGGT_LOG_RESULTS="'"${LOG_RESULTS}"'"
-	    export VGGT_FINETUNE_CKPT="'"${FINETUNE_CKPT}"'"
+	    if [ "${VGGT_LOAD_BACKBONE_CKPT}" = "1" ]; then
+	      export VGGT_FINETUNE_CKPT="'"${FINETUNE_CKPT}"'"
+	    else
+	      unset VGGT_FINETUNE_CKPT
+	    fi
 	    export VGGT_LOAD_BACKBONE_CKPT="'"${LOAD_BACKBONE_CKPT}"'"
 	    export VGGT_M2F_CFG="'"${M2F_CFG}"'"
 	    export VGGT_M2F_WEIGHTS="'"${M2F_WEIGHTS}"'"
