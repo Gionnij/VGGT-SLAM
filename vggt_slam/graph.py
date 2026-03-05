@@ -2,11 +2,35 @@ import gtsam
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-from gtsam import NonlinearFactorGraph, Values, noiseModel
+
+def _gtsam_sym(name):
+    if hasattr(gtsam, name):
+        return getattr(gtsam, name)
+    core = getattr(gtsam, "gtsam", None)
+    if core is not None and hasattr(core, name):
+        return getattr(core, name)
+    try:
+        import gtsam.gtsam as gtsam_core  # type: ignore
+        if hasattr(gtsam_core, name):
+            return getattr(gtsam_core, name)
+    except Exception:
+        pass
+    raise ImportError(f"gtsam symbol not found: {name}")
+
+
+NonlinearFactorGraph = _gtsam_sym("NonlinearFactorGraph")
+Values = _gtsam_sym("Values")
+noiseModel = _gtsam_sym("noiseModel")
 # NOTE: Import our custom SL4 class and bindings (assumed already wrapped)
 # `gtsam` should be installed via `gtsam_with_sl4` repository
-from gtsam import SL4, PriorFactorSL4, BetweenFactorSL4
-from gtsam.symbol_shorthand import X
+SL4 = _gtsam_sym("SL4")
+PriorFactorSL4 = _gtsam_sym("PriorFactorSL4")
+BetweenFactorSL4 = _gtsam_sym("BetweenFactorSL4")
+LevenbergMarquardtOptimizer = _gtsam_sym("LevenbergMarquardtOptimizer")
+try:
+    from gtsam.symbol_shorthand import X
+except Exception:
+    X = _gtsam_sym("symbol_shorthand").X
 
 class PoseGraph:
     def __init__(self):
@@ -46,7 +70,7 @@ class PoseGraph:
         key2 = X(key2)
         if key1 not in self.initialized_nodes or key2 not in self.initialized_nodes:
             raise ValueError(f"Both poses {key1} and {key2} must exist before adding a factor.")
-        self.graph.add(gtsam.BetweenFactorSL4(key1, key2, SL4(relative_h), noise))
+        self.graph.add(BetweenFactorSL4(key1, key2, SL4(relative_h), noise))
     
     def add_prior_factor(self, key, global_h, noise):
         key = X(key)
@@ -68,7 +92,7 @@ class PoseGraph:
     
     def optimize(self):
         """Optimize the graph and update estimates."""
-        optimizer = gtsam.LevenbergMarquardtOptimizer(self.graph, self.values)
+        optimizer = LevenbergMarquardtOptimizer(self.graph, self.values)
         result = optimizer.optimize()
         self.values = result  # Update values with optimized results
 

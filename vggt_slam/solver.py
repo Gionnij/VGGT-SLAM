@@ -26,6 +26,21 @@ from pipeline_check import get_pipeline_logger
 _SEM_RUNNER_LOGGED = False
 _SEM_ERROR_COUNT = 0
 
+
+def _gtsam_sym(name):
+    if hasattr(gtsam, name):
+        return getattr(gtsam, name)
+    core = getattr(gtsam, "gtsam", None)
+    if core is not None and hasattr(core, name):
+        return getattr(core, name)
+    try:
+        import gtsam.gtsam as gtsam_core  # type: ignore
+        if hasattr(gtsam_core, name):
+            return getattr(gtsam_core, name)
+    except Exception:
+        pass
+    raise ImportError(f"gtsam symbol not found: {name}")
+
 def color_point_cloud_by_confidence(pcd, confidence, cmap='viridis'):
     """
     Color a point cloud based on per-point confidence values.
@@ -367,8 +382,9 @@ class Solver:
             if self.use_sim3:
                 pose_world_detected = self.map.get_submap(loop.detected_submap_id).get_pose_subframe(loop.detected_submap_frame)
                 pose_world_query = self.current_working_submap.get_pose_subframe(loop_index)
-                pose_world_detected = gtsam.Pose3(pose_world_detected)
-                pose_world_query = gtsam.Pose3(pose_world_query)
+                Pose3 = _gtsam_sym("Pose3")
+                pose_world_detected = Pose3(pose_world_detected)
+                pose_world_query = Pose3(pose_world_query)
                 H_relative_lc = pose_world_detected.between(pose_world_query).matrix()
             else:
                 points_world_detected = self.map.get_submap(loop.detected_submap_id).get_frame_pointcloud(loop.detected_submap_frame).reshape(-1, 3)

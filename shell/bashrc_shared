@@ -643,7 +643,18 @@ except Exception as e:
     ok = False
 try:
     gtsam = importlib.import_module("gtsam")
-    _ = gtsam.NonlinearFactorGraph
+    ok_gtsam = hasattr(gtsam, "NonlinearFactorGraph")
+    if not ok_gtsam:
+        core = getattr(gtsam, "gtsam", None)
+        ok_gtsam = (core is not None and hasattr(core, "NonlinearFactorGraph"))
+    if not ok_gtsam:
+        try:
+            core = importlib.import_module("gtsam.gtsam")
+            ok_gtsam = hasattr(core, "NonlinearFactorGraph")
+        except Exception:
+            ok_gtsam = False
+    if not ok_gtsam:
+        raise RuntimeError("NonlinearFactorGraph not found in gtsam module layouts")
     print("gtsam       : OK")
 except Exception as e:
     print("gtsam       : MISSING/BROKEN", e)

@@ -2,8 +2,35 @@ import gtsam
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-from gtsam import Pose3, Rot3, Point3, NonlinearFactorGraph, Values, noiseModel, PriorFactorPose3
-from gtsam.symbol_shorthand import X
+
+def _gtsam_sym(name):
+    if hasattr(gtsam, name):
+        return getattr(gtsam, name)
+    core = getattr(gtsam, "gtsam", None)
+    if core is not None and hasattr(core, name):
+        return getattr(core, name)
+    try:
+        import gtsam.gtsam as gtsam_core  # type: ignore
+        if hasattr(gtsam_core, name):
+            return getattr(gtsam_core, name)
+    except Exception:
+        pass
+    raise ImportError(f"gtsam symbol not found: {name}")
+
+
+Pose3 = _gtsam_sym("Pose3")
+Rot3 = _gtsam_sym("Rot3")
+Point3 = _gtsam_sym("Point3")
+NonlinearFactorGraph = _gtsam_sym("NonlinearFactorGraph")
+Values = _gtsam_sym("Values")
+noiseModel = _gtsam_sym("noiseModel")
+PriorFactorPose3 = _gtsam_sym("PriorFactorPose3")
+BetweenFactorPose3 = _gtsam_sym("BetweenFactorPose3")
+LevenbergMarquardtOptimizer = _gtsam_sym("LevenbergMarquardtOptimizer")
+try:
+    from gtsam.symbol_shorthand import X
+except Exception:
+    X = _gtsam_sym("symbol_shorthand").X
 
 class PoseGraph:
     def __init__(self):
@@ -30,7 +57,7 @@ class PoseGraph:
         key2 = X(key2)
         if key1 not in self.initialized_nodes or key2 not in self.initialized_nodes:
             raise ValueError(f"Both poses {key1} and {key2} must exist before adding a factor.")
-        self.graph.add(gtsam.BetweenFactorPose3(key1, key2, Pose3(relative_pose), noise))
+        self.graph.add(BetweenFactorPose3(key1, key2, Pose3(relative_pose), noise))
     
     def add_prior_factor(self, key, pose, noise):
         key = X(key)
@@ -49,7 +76,7 @@ class PoseGraph:
 
     def optimize(self):
         """Optimize the graph and update estimates."""
-        optimizer = gtsam.LevenbergMarquardtOptimizer(self.graph, self.values)
+        optimizer = LevenbergMarquardtOptimizer(self.graph, self.values)
         result = optimizer.optimize()
         self.values = result  # Update values with optimized results
 
