@@ -402,10 +402,15 @@ _run_vggt_live_mode () {
   local STOP_TOPIC="${VGGT_STOP_TOPIC:-/stream/stop}"
   local LOG_RESULTS="${VGGT_LOG_RESULTS:-0}"
   local FINETUNE_CKPT="${VGGT_FINETUNE_CKPT:-}"
+  local LOAD_BACKBONE_CKPT="${VGGT_LOAD_BACKBONE_CKPT:-0}"
+  local M2F_CFG="${VGGT_M2F_CFG:-${VGGT_SLAM_ROOT}/mask2former/configs/ade20k/semantic-segmentation/maskformer2_R50_bs16_160k.yaml}"
+  local M2F_WEIGHTS="${VGGT_M2F_WEIGHTS:-${FINETUNE_CKPT:-$HOME/models/m2f_ade20k.pkl}}"
   local MAX_LIVE_STEPS="${VGGT_MAX_LIVE_STEPS:-0}"
   local ENABLE_TAPS="${VGGT_ENABLE_TAPS:-${default_enable_taps}}"
   local ENABLE_FILM="${VGGT_FUSE_FILM:-${default_enable_film}}"
   local ENABLE_SEM="${VGGT_SEMANTIC_HEAD:-${default_enable_sem}}"
+  local SEM_CLASSES="${VGGT_SEM_CLASSES:-60}"
+  local SEM_QUERIES="${VGGT_SEM_QUERIES:-100}"
   local ENABLE_PIPELINE_CHECK="${VGGT_PIPELINE_CHECK:-${default_pipeline_check}}"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
@@ -466,8 +471,8 @@ EOF
 	    export VGGT_FUSE_FILM_TEST=1
 
 	    export VGGT_SEMANTIC_HEAD="'"${ENABLE_SEM}"'"
-	    export VGGT_SEM_CLASSES=20
-	    export VGGT_SEM_QUERIES=50
+	    export VGGT_SEM_CLASSES="'"${SEM_CLASSES}"'"
+	    export VGGT_SEM_QUERIES="'"${SEM_QUERIES}"'"
 
 	    export VGGT_PIPELINE_CHECK="'"${ENABLE_PIPELINE_CHECK}"'"
 	    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
@@ -475,15 +480,19 @@ EOF
 	    export VGGT_STOP_TOPIC="'"${STOP_TOPIC}"'"
 	    export VGGT_LOG_RESULTS="'"${LOG_RESULTS}"'"
 	    export VGGT_FINETUNE_CKPT="'"${FINETUNE_CKPT}"'"
+	    export VGGT_LOAD_BACKBONE_CKPT="'"${LOAD_BACKBONE_CKPT}"'"
+	    export VGGT_M2F_CFG="'"${M2F_CFG}"'"
+	    export VGGT_M2F_WEIGHTS="'"${M2F_WEIGHTS}"'"
 	    export VGGT_MAX_LIVE_STEPS="'"${MAX_LIVE_STEPS}"'"
 	    [ -n "${VGGT_FINETUNE_CKPT:-}" ] && echo "[run_'"${mode}"'] Fine-tune checkpoint: ${VGGT_FINETUNE_CKPT}"
+	    [ -n "${VGGT_M2F_WEIGHTS:-}" ] && echo "[run_'"${mode}"'] Semantic weights: ${VGGT_M2F_WEIGHTS}"
 	    [ -n "${VGGT_DEMO_ROOT:-}" ] && echo "[run_'"${mode}"'] Demo root: ${VGGT_DEMO_ROOT}"
 	    echo "[run_'"${mode}"'] taps=${VGGT_ENABLE_TAPS} film=${VGGT_FUSE_FILM} sem=${VGGT_SEMANTIC_HEAD}"
 	    EXTRA_ARGS=""
 	    if [ "${VGGT_LOG_RESULTS}" = "1" ]; then
 	      EXTRA_ARGS="${EXTRA_ARGS} --log_results"
 	    fi
-	    if [ -n "${VGGT_FINETUNE_CKPT}" ]; then
+	    if [ "${VGGT_LOAD_BACKBONE_CKPT}" = "1" ] && [ -n "${VGGT_FINETUNE_CKPT}" ]; then
 	      EXTRA_ARGS="${EXTRA_ARGS} --finetune-checkpoint ${VGGT_FINETUNE_CKPT}"
 	    fi
 
@@ -974,8 +983,10 @@ EOF
       export VGGT_FUSE_FILM_TEST=1
 
       export VGGT_SEMANTIC_HEAD=1
-      export VGGT_SEM_CLASSES=20
-      export VGGT_SEM_QUERIES=50
+      export VGGT_SEM_CLASSES="${VGGT_SEM_CLASSES:-60}"
+      export VGGT_SEM_QUERIES="${VGGT_SEM_QUERIES:-100}"
+      export VGGT_M2F_CFG="${VGGT_M2F_CFG:-${VGGT_SLAM_ROOT}/mask2former/configs/ade20k/semantic-segmentation/maskformer2_R50_bs16_160k.yaml}"
+      export VGGT_M2F_WEIGHTS="${VGGT_M2F_WEIGHTS:-$HOME/models/m2f_ade20k.pkl}"
 
       export VGGT_PIPELINE_CHECK=1
       export VGGT_PIPELINE_CHECK_PATH=\"debug/pipeline_check.txt\"

@@ -6,6 +6,7 @@ import torch
 from .semantic_head import SemanticHead
 
 _SEM_REGISTRY: Dict[str, SemanticHead] = {}
+_SEM_CONFIG_WARNED = False
 
 
 def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -62,6 +63,18 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
     Controlled via env `VGGT_SEMANTIC_HEAD=1`.
     """
     if os.getenv("VGGT_SEMANTIC_HEAD", "0") != "1":
+        return
+
+    global _SEM_CONFIG_WARNED
+    cfg_path = os.getenv("VGGT_M2F_CFG")
+    weights_path = os.getenv("VGGT_M2F_WEIGHTS")
+    if not cfg_path or not weights_path:
+        if not _SEM_CONFIG_WARNED:
+            print(
+                "[SEM] Disabled for this run: missing VGGT_M2F_CFG/VGGT_M2F_WEIGHTS. "
+                "Refusing to run with uninitialized semantic weights."
+            )
+            _SEM_CONFIG_WARNED = True
         return
 
     images = predictions.get("images")

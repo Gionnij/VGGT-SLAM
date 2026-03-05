@@ -109,6 +109,11 @@ class SemanticHead(nn.Module):
         except (RuntimeError, pickle.UnpicklingError):
             with path.open("rb") as f:
                 state = pickle.load(f)
+        if isinstance(state, dict) and "model_state" in state and isinstance(state["model_state"], dict):
+            # Training checkpoints from train_film_m2f_optimized_png.py
+            state = state["model_state"]
+        if isinstance(state, dict) and "state_dict" in state and isinstance(state["state_dict"], dict):
+            state = state["state_dict"]
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
         target_state = self.head.state_dict()
@@ -127,9 +132,13 @@ class SemanticHead(nn.Module):
 
         head_state = {}
         for k, v in state.items():
-            if not k.startswith("sem_seg_head."):
+            if k.startswith("sem_seg_head."):
+                name = k.replace("sem_seg_head.", "", 1)
+            elif k.startswith("sem_head.head."):
+                # Fine-tuned FusionMask2Former checkpoints.
+                name = k.replace("sem_head.head.", "", 1)
+            else:
                 continue
-            name = k.replace("sem_seg_head.", "", 1)
             if isinstance(v, torch.Tensor):
                 tensor = v
             elif isinstance(v, np.ndarray):
@@ -145,7 +154,13 @@ class SemanticHead(nn.Module):
                     continue
                 tensor = adapted
             head_state[name] = tensor.to(dtype=tgt.dtype)
+        if not head_state:
+            raise RuntimeError(
+                f"No semantic head weights matched for {path}. "
+                "Expected prefixes: sem_seg_head.* or sem_head.head.*"
+            )
         missing, unexpected = self.head.load_state_dict(head_state, strict=False)
+        print(f"[SEM] Loaded semantic head tensors: {len(head_state)} from {path}")
         if missing:
             print(f"[SEM] Missing weights for keys: {missing}")
         if unexpected:

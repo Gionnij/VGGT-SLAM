@@ -721,6 +721,8 @@ def main():
         ft = torch.load(args.finetune_checkpoint, map_location="cpu")
         if isinstance(ft, dict) and "state_dict" in ft and isinstance(ft["state_dict"], dict):
             ft_state = ft["state_dict"]
+        elif isinstance(ft, dict) and "model_state" in ft and isinstance(ft["model_state"], dict):
+            ft_state = ft["model_state"]
         elif isinstance(ft, dict) and "model" in ft and isinstance(ft["model"], dict):
             ft_state = ft["model"]
         elif isinstance(ft, dict):
@@ -734,9 +736,18 @@ def main():
             remap[nk] = v
 
         ft_missing, ft_unexpected = model.load_state_dict(remap, strict=False)
+        loaded_count = max(0, len(remap) - len(ft_unexpected))
         print(
-            f"[FT] load strict=False: missing={len(ft_missing)} unexpected={len(ft_unexpected)}"
+            f"[FT] load strict=False: loaded={loaded_count} missing={len(ft_missing)} unexpected={len(ft_unexpected)}"
         )
+        if loaded_count == 0:
+            sample = list(remap.keys())[:10]
+            raise RuntimeError(
+                "Fine-tuned checkpoint appears incompatible with VGGT model (0 parameters loaded). "
+                f"Sample keys: {sample}. "
+                "This usually means you passed a Fusion+Mask2Former checkpoint "
+                "(e.g., from train_film_m2f_optimized_png.py) to main_live_stream.py."
+            )
 
     try:
         dh = getattr(model, "depth_head", None)
