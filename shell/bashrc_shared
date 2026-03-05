@@ -296,17 +296,29 @@ hpc_gpu_state_file () {
   echo "${VGGT_GPU_STATE_FILE:-$HOME/.vggt_active_gpu.env}"
 }
 
+_pick_host_ip () {
+  local fallback="${1:-127.0.0.1}"
+  local ips
+  ips="$(hostname -I 2>/dev/null || true)"
+  awk -v fb="${fallback}" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^10[.]/) { print $i; found = 1; exit }
+        if (first == "") first = $i
+      }
+    }
+    END {
+      if (!found && first != "") print first
+      else if (!found) print fb
+    }
+  ' <<<"${ips}"
+}
+
 # Record current node identity/IP so head-side services can target it.
 hpc_record_gpu_state () {
   local node ip file run_id
   node="$(hostname -s 2>/dev/null || hostname)"
-  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '
-    /^10[.]/ {print; found=1; exit}
-    { if ($0 != "") first=$0 }
-    END {
-      if (!found && first != "") print first
-      else if (!found) print "127.0.0.1"
-    }')"
+  ip="$(_pick_host_ip "127.0.0.1")"
   file="$(hpc_gpu_state_file)"
   run_id="${HPC_GPU_RUN_ID:-${VGGT_GPU_RUN_ID:-}}"
   cat > "${file}" <<EOF
@@ -364,13 +376,7 @@ hpc_head_bridge () {
   done
 
   local head_ip
-  head_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '
-    /^10[.]/ {print; found=1; exit}
-    { if ($0 != "") first=$0 }
-    END {
-      if (!found && first != "") print first
-      else if (!found) print "130.89.6.254"
-    }')"
+  head_ip="$(_pick_host_ip "130.89.6.254")"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -445,13 +451,7 @@ _run_vggt_live_mode () {
     module load singularity/3.9.5 2>/dev/null || true
   fi
 
-  GPU_IP=$(hostname -I | tr " " "\n" | awk '
-    /^10[.]/ {print; found=1; exit}
-    { if ($0 != "") first=$0 }
-    END {
-      if (!found && first != "") print first
-      else if (!found) print "127.0.0.1"
-    }')
+  GPU_IP="$(_pick_host_ip "127.0.0.1")"
   CPU_IP="130.89.6.254"
   local USE_DDS_SERVER="${USE_DDS_SERVER:-0}"
   local DDS_SERVER_ADDR="${ROS_DISCOVERY_SERVER:-${CPU_IP}:11811}"
@@ -1074,13 +1074,7 @@ run_vggt_m2f () {
 
   # 3) ROS2 FastDDS unicast config
   local GPU_IP
-  GPU_IP=$(hostname -I | tr " " "\n" | awk '
-    /^10[.]/ {print; found=1; exit}
-    { if ($0 != "") first=$0 }
-    END {
-      if (!found && first != "") print first
-      else if (!found) print "127.0.0.1"
-    }')
+  GPU_IP="$(_pick_host_ip "127.0.0.1")"
   local CPU_IP="130.89.6.254"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
