@@ -229,7 +229,13 @@ hpc_gpu_state_file () {
 hpc_record_gpu_state () {
   local node ip file run_id
   node="$(hostname -s 2>/dev/null || hostname)"
-  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')"
+  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '
+    /^10[.]/ {print; found=1; exit}
+    { if ($0 != "") first=$0 }
+    END {
+      if (!found && first != "") print first
+      else if (!found) print "127.0.0.1"
+    }')"
   file="$(hpc_gpu_state_file)"
   run_id="${HPC_GPU_RUN_ID:-${VGGT_GPU_RUN_ID:-}}"
   cat > "${file}" <<EOF
@@ -287,7 +293,13 @@ hpc_head_bridge () {
   done
 
   local head_ip
-  head_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^10[.]/ {print; exit} END{ if(!NR) print "130.89.6.254" }')"
+  head_ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '
+    /^10[.]/ {print; found=1; exit}
+    { if ($0 != "") first=$0 }
+    END {
+      if (!found && first != "") print first
+      else if (!found) print "130.89.6.254"
+    }')"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
@@ -866,7 +878,13 @@ run_vggt_m2f () {
 
   # 3) ROS2 FastDDS unicast config
   local GPU_IP
-  GPU_IP=$(hostname -I | tr " " "\n" | awk '/^10[.]/ {print; exit} END{ if(!NR) print "127.0.0.1" }')
+  GPU_IP=$(hostname -I | tr " " "\n" | awk '
+    /^10[.]/ {print; found=1; exit}
+    { if ($0 != "") first=$0 }
+    END {
+      if (!found && first != "") print first
+      else if (!found) print "127.0.0.1"
+    }')
   local CPU_IP="130.89.6.254"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
