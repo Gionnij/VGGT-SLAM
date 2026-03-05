@@ -550,7 +550,7 @@ EOF
 	    export VGGT_DEMO_ROOT="'"${DEMO_ROOT}"'"
 	    export VGGT_STOP_TOPIC="'"${STOP_TOPIC}"'"
 	    export VGGT_LOG_RESULTS="'"${LOG_RESULTS}"'"
-	    if [ "${VGGT_LOAD_BACKBONE_CKPT}" = "1" ]; then
+	    if [ "'"${LOAD_BACKBONE_CKPT}"'" = "1" ]; then
 	      export VGGT_FINETUNE_CKPT="'"${FINETUNE_CKPT}"'"
 	    else
 	      unset VGGT_FINETUNE_CKPT
