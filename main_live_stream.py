@@ -786,6 +786,7 @@ def main():
     trace = None
     if enable_taps:
         tapper = attach_vggt_taps(model, logdir="tap_logs", capture_every=1)
+        setattr(model, "_feature_tapper", tapper)
         install_trace_probes(model)
         trace = TraceSink("tap_logs/trace.jsonl")
     else:

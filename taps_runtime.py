@@ -294,6 +294,41 @@ class VGGTFeatureTapper:
             h.remove()
         self._handles.clear()
 
+    @torch.no_grad()
+    def extract_dino_fmap(self, batch_shape: Tuple[int, int, int, int, int]) -> Optional[torch.Tensor]:
+        """
+        Return projected DINO fmap as [B,S,256,Htok,Wtok] for the latest forward pass.
+        Uses cached tokens from self.dino_tap.
+        """
+        if self.dino_tap is None or self.dino_tap not in self._cache:
+            return None
+        tokens = self._cache[self.dino_tap]
+        if not isinstance(tokens, torch.Tensor) or tokens.dim() != 3:
+            return None
+
+        B_in, S_in, _, H_in, W_in = batch_shape
+        Btok, N, Cin = tokens.shape
+        Htok, Wtok = max(1, H_in // self._patch_size), max(1, W_in // self._patch_size)
+        expected = Htok * Wtok
+        if N < expected:
+            return None
+
+        patch_tokens = tokens[:, N - expected :, :]  # drop specials if present
+        fmap = patch_tokens.transpose(1, 2).reshape(Btok, Cin, Htok, Wtok)
+
+        if not self._initialized_proj:
+            self._dino_proj = nn.Conv2d(Cin, 256, kernel_size=1).to(fmap.device)
+            self._initialized_proj = True
+        dino = self._dino_proj(fmap)
+
+        # Common case: flattened (B*S, C, Htok, Wtok)
+        if Btok == B_in * S_in:
+            return dino.reshape(B_in, S_in, dino.shape[1], dino.shape[2], dino.shape[3])
+        # Single-batch case where token batch equals temporal length.
+        if B_in == 1:
+            return dino.unsqueeze(0)
+        return None
+
 def attach_vggt_taps(model: nn.Module, logdir="tap_logs", capture_every=1, save_small_tensors=False):
     """
     Call this ONCE after you construct VGGT in main_live_stream.py.
