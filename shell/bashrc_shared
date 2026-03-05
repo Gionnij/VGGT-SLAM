@@ -518,6 +518,19 @@ EOF
   local SIF="${HOME}/containers/ros_humble_perception.sif"
   local binds=( --bind "${VGGT_VENV_DIR}:/venvs" --bind "${VGGT_SLAM_ROOT}:${VGGT_SLAM_ROOT}" )
   [ -d "${HOME}/models" ] && binds+=( --bind "${HOME}/models:${HOME}/models" )
+  local host_libffi=""
+  host_libffi="$(ldconfig -p 2>/dev/null | awk '/libffi.so.7/ {print $4; exit}')"
+  if [ -z "${host_libffi}" ]; then
+    for cand in /usr/lib/x86_64-linux-gnu/libffi.so.7 /lib/x86_64-linux-gnu/libffi.so.7 /usr/lib64/libffi.so.7; do
+      if [ -f "${cand}" ]; then
+        host_libffi="${cand}"
+        break
+      fi
+    done
+  fi
+  if [ -n "${host_libffi}" ] && [ -f "${host_libffi}" ]; then
+    binds+=( --bind "${host_libffi}:/usr/lib/x86_64-linux-gnu/libffi.so.7" )
+  fi
 
   singularity exec --nv --cleanenv "${binds[@]}" "${SIF}" bash -lc '
     set -eE -o pipefail

@@ -170,7 +170,8 @@ class Solver:
             from vggt_slam.graph import PoseGraph
         self.graph = PoseGraph()
 
-        self.image_retrieval = ImageRetrieval()
+        self.image_retrieval = None
+        self._loop_retrieval_disabled = str(os.getenv("VGGT_DISABLE_LOOP_RETRIEVAL", "0")).strip().lower() in ("1", "true", "yes", "on")
         self.current_working_submap = None
 
         self.first_edge = True
@@ -184,6 +185,15 @@ class Solver:
         self.vis_point_size = vis_point_size
 
         print("Starting viser server...")
+
+    def _get_image_retrieval(self):
+        if self._loop_retrieval_disabled:
+            return None
+        if self.image_retrieval is None:
+            print("[LoopRetrieval] Initializing SALAD retrieval model...")
+            self.image_retrieval = ImageRetrieval()
+            print("[LoopRetrieval] Ready.")
+        return self.image_retrieval
 
     def set_point_cloud(self, points_in_world_frame, points_colors, name, point_size):
         if self.gradio_mode:
@@ -442,13 +452,16 @@ class Solver:
             new_submap.set_frame_ids(list(frame_ids_window))
         else:
             new_submap.set_frame_ids(image_names)
-        new_submap.set_all_retrieval_vectors(self.image_retrieval.get_all_submap_embeddings(new_submap))
-
-        # TODO implement this
-        detected_loops = self.image_retrieval.find_loop_closures(self.map, new_submap, max_loop_closures=max_loops)
-        if len(detected_loops) > 0:
-            print(colored("detected_loops", "yellow"), detected_loops)
-        retrieved_frames = self.map.get_frames_from_loops(detected_loops)
+        detected_loops = []
+        retrieved_frames = []
+        if max_loops > 0:
+            retriever = self._get_image_retrieval()
+            if retriever is not None:
+                new_submap.set_all_retrieval_vectors(retriever.get_all_submap_embeddings(new_submap))
+                detected_loops = retriever.find_loop_closures(self.map, new_submap, max_loop_closures=max_loops)
+                if len(detected_loops) > 0:
+                    print(colored("detected_loops", "yellow"), detected_loops)
+                retrieved_frames = self.map.get_frames_from_loops(detected_loops)
 
         num_loop_frames = len(retrieved_frames)
         new_submap.set_last_non_loop_frame_index(images.shape[0] - 1)
