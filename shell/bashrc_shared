@@ -605,7 +605,11 @@ EOF
 		    else
 		      export VGGT_PIPELINE_PYTHON=/venvs/vggt/bin/python
 		    fi
+		    if [ -z "${VGGT_GTSAM_SITEPKG:-}" ] && [ "${VGGT_PIPELINE_PYTHON}" = "/venvs/vggt-m2f/bin/python" ] && [ -d "/venvs/vggt/lib/python3.10/site-packages" ]; then
+		      export VGGT_GTSAM_SITEPKG="/venvs/vggt/lib/python3.10/site-packages"
+		    fi
 		    echo "[run_'"${mode}"'] python_exe=${VGGT_PIPELINE_PYTHON}"
+		    [ -n "${VGGT_GTSAM_SITEPKG:-}" ] && echo "[run_'"${mode}"'] gtsam_site=${VGGT_GTSAM_SITEPKG}"
 
 		    "${VGGT_PIPELINE_PYTHON}" - <<'"'"'PY'"'"'
 import sys, torch, os
@@ -619,6 +623,7 @@ print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
 print("Sem head    :", os.getenv("VGGT_SEMANTIC_HEAD"))
 print("Sem backend :", os.getenv("VGGT_SEM_BACKEND"))
 print("Mask2Former skip data:", os.getenv("MASK2FORMER_SKIP_DATA"))
+print("gtsam site  :", os.getenv("VGGT_GTSAM_SITEPKG"))
 ok = True
 try:
     import numpy as np
@@ -654,7 +659,24 @@ try:
         except Exception:
             ok_gtsam = False
     if not ok_gtsam:
-        raise RuntimeError("NonlinearFactorGraph not found in gtsam module layouts")
+        gtsam_site = os.getenv("VGGT_GTSAM_SITEPKG", "")
+        if gtsam_site and gtsam_site not in sys.path:
+            sys.path.insert(0, gtsam_site)
+            sys.modules.pop("gtsam", None)
+            sys.modules.pop("gtsam.gtsam", None)
+            gtsam = importlib.import_module("gtsam")
+            ok_gtsam = hasattr(gtsam, "NonlinearFactorGraph")
+            if not ok_gtsam:
+                core = getattr(gtsam, "gtsam", None)
+                ok_gtsam = (core is not None and hasattr(core, "NonlinearFactorGraph"))
+            if not ok_gtsam:
+                try:
+                    core = importlib.import_module("gtsam.gtsam")
+                    ok_gtsam = hasattr(core, "NonlinearFactorGraph")
+                except Exception:
+                    ok_gtsam = False
+        if not ok_gtsam:
+            raise RuntimeError("NonlinearFactorGraph not found in gtsam module layouts")
     print("gtsam       : OK")
 except Exception as e:
     print("gtsam       : MISSING/BROKEN", e)

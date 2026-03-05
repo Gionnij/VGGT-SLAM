@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import os
+import sys
 import glob
 import argparse
 import time
@@ -21,6 +22,13 @@ import torch
 import cv2
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
+
+# Optional: allow importing gtsam bindings from an alternate site-packages path
+# (useful when runtime python has detectron2/cv_bridge but gtsam lives in another venv).
+_GTSAM_SITEPKG = os.getenv("VGGT_GTSAM_SITEPKG", "").strip()
+if _GTSAM_SITEPKG and os.path.isdir(_GTSAM_SITEPKG) and _GTSAM_SITEPKG not in sys.path:
+    sys.path.insert(0, _GTSAM_SITEPKG)
+    print(f"[gtsam-path] prepended {_GTSAM_SITEPKG}")
 
 import vggt_slam.slam_utils as utils
 from vggt_slam.solver import Solver
