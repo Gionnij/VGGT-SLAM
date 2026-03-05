@@ -521,7 +521,7 @@ EOF
   local host_libffi=""
   local ldconfig_cache=""
   ldconfig_cache="$(ldconfig -p 2>/dev/null || true)"
-  host_libffi="$(printf "%s\n" "${ldconfig_cache}" | awk '/libffi\.so\.7/ {print $NF; exit}')"
+  host_libffi="$(awk '/libffi\.so\.7/ {print $NF; exit}' <<<"${ldconfig_cache}")"
   if [ -z "${host_libffi}" ]; then
     for cand in /usr/lib/x86_64-linux-gnu/libffi.so.7 /lib/x86_64-linux-gnu/libffi.so.7 /usr/lib64/libffi.so.7; do
       if [ -f "${cand}" ]; then
@@ -1146,7 +1146,7 @@ EOF
   local host_libffi
   local ldconfig_cache
   ldconfig_cache="$(ldconfig -p 2>/dev/null || true)"
-  host_libffi="$(printf "%s\n" "${ldconfig_cache}" | awk '/libffi\.so\.7/ {print $NF; exit}')"
+  host_libffi="$(awk '/libffi\.so\.7/ {print $NF; exit}' <<<"${ldconfig_cache}")"
 
   local binds=(
     --bind "${VGGT_VENV_DIR}:/venvs"
