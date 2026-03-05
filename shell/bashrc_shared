@@ -531,7 +531,12 @@ EOF
     done
   fi
   if [ -n "${host_libffi}" ] && [ -f "${host_libffi}" ]; then
+    echo "[run_${mode}] host_libffi=${host_libffi}"
     binds+=( --bind "${host_libffi}:/usr/lib/x86_64-linux-gnu/libffi.so.7" )
+    binds+=( --bind "${host_libffi}:/lib/x86_64-linux-gnu/libffi.so.7" )
+    binds+=( --bind "${host_libffi}:/usr/lib64/libffi.so.7" )
+  else
+    echo "[run_${mode}] WARN: libffi.so.7 not found on host; python extensions may fail in container"
   fi
 
   singularity exec --nv --cleanenv "${binds[@]}" "${SIF}" bash -lc '
@@ -593,7 +598,9 @@ EOF
 	      EXTRA_ARGS="${EXTRA_ARGS} --finetune-checkpoint ${VGGT_FINETUNE_CKPT}"
 	    fi
 
-		    if [ -x /venvs/vggt-m2f/bin/python ]; then
+		    if [ -n "${VGGT_PIPELINE_PYTHON:-}" ] && [ -x "${VGGT_PIPELINE_PYTHON}" ]; then
+		      export VGGT_PIPELINE_PYTHON="${VGGT_PIPELINE_PYTHON}"
+		    elif [ -x /venvs/vggt-m2f/bin/python ]; then
 		      export VGGT_PIPELINE_PYTHON=/venvs/vggt-m2f/bin/python
 		    else
 		      export VGGT_PIPELINE_PYTHON=/venvs/vggt/bin/python
@@ -602,6 +609,7 @@ EOF
 
 		    "${VGGT_PIPELINE_PYTHON}" - <<'"'"'PY'"'"'
 import sys, torch, os
+import importlib
 print("python:", sys.executable)
 print("CUDA:", torch.version.cuda, "GPU?", torch.cuda.is_available())
 print("Taps enabled:", os.getenv("VGGT_ENABLE_TAPS"))
@@ -611,11 +619,37 @@ print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
 print("Sem head    :", os.getenv("VGGT_SEMANTIC_HEAD"))
 print("Sem backend :", os.getenv("VGGT_SEM_BACKEND"))
 print("Mask2Former skip data:", os.getenv("MASK2FORMER_SKIP_DATA"))
+ok = True
+try:
+    import numpy as np
+    print("numpy       :", np.__version__)
+    if int(np.__version__.split(".", 1)[0]) >= 2:
+        print("numpy ABI   : incompatible for ROS cv_bridge/gtsam extensions (need numpy<2)")
+        ok = False
+except Exception as e:
+    print("numpy       : FAILED", e)
+    ok = False
 try:
     import detectron2  # noqa: F401
     print("detectron2  : OK")
 except Exception as e:
     print("detectron2  : MISSING", e)
+    ok = False
+try:
+    import cv_bridge  # noqa: F401
+    print("cv_bridge   : OK")
+except Exception as e:
+    print("cv_bridge   : MISSING/BROKEN", e)
+    ok = False
+try:
+    gtsam = importlib.import_module("gtsam")
+    _ = gtsam.NonlinearFactorGraph
+    print("gtsam       : OK")
+except Exception as e:
+    print("gtsam       : MISSING/BROKEN", e)
+    ok = False
+if not ok:
+    raise SystemExit(2)
 PY
 
 		    "${VGGT_PIPELINE_PYTHON}" "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
