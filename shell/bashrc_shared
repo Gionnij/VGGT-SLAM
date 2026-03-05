@@ -97,6 +97,49 @@ pub_images () {
   "
 }
 
+# Stream a local scene folder over Unitree-style TCP framing to mimic robot camera stream.
+# Usage:
+#   pub_images_tcp [scene_id] [fps] [port] [mode]
+# Examples:
+#   pub_images_tcp 1841a0b525 2.0 15001 loop
+#   pub_images_tcp 1841a0b525 2.0 15001 oneshot
+pub_images_tcp () {
+  cleanenv 2>/dev/null || true
+  if command -v module >/dev/null 2>&1; then
+    module load singularity/3.9.5 2>/dev/null || true
+  fi
+
+  local scene_id="${1:-1841a0b525}"
+  local fps="${2:-2.0}"
+  local port="${3:-15001}"
+  local mode="${4:-loop}"
+  local bind_addr="${PUB_IMAGES_TCP_BIND:-127.0.0.1}"
+  local dataset_root="${PUB_IMAGES_DATASET_ROOT:-$HOME/src/VGGT-SLAM/dataset_ready}"
+  local folder="${dataset_root}/${scene_id}/images"
+  local sif="${HOME}/containers/ros_humble_perception.sif"
+
+  local loop_flag=""
+  if [ "${mode}" = "loop" ]; then
+    loop_flag="--loop"
+  fi
+
+  echo "[pub_images_tcp] scene=${scene_id} folder=${folder}"
+  echo "[pub_images_tcp] serving on ${bind_addr}:${port} at ${fps} FPS mode=${mode}"
+
+  singularity exec --cleanenv "${sif}" bash -lc "
+    set -eE -o pipefail
+    python3 ${VGGT_SLAM_ROOT}/scene_tcp_streamer.py \
+      --folder '${folder}' \
+      --bind '${bind_addr}' \
+      --port '${port}' \
+      --fps '${fps}' \
+      --max-width 960 \
+      --max-height 540 \
+      --quality 90 \
+      ${loop_flag}
+  "
+}
+
 # Start Fast DDS Discovery Server on HPC (run on head/login node).
 # Usage: dds_server_hpc [port]
 dds_server_hpc () {
