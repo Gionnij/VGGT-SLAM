@@ -532,7 +532,7 @@ EOF
 	      echo "[run_'"${mode}"'] Discovery server: ${ROS_DISCOVERY_SERVER}"
 	    fi
 
-	    export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:$PYTHONPATH"
+	    export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:'"${VGGT_SLAM_ROOT}"'/mask2former:$PYTHONPATH"
 
 	    export VGGT_ENABLE_TAPS="'"${ENABLE_TAPS}"'"
 	    export VGGT_FUSE_FILM="'"${ENABLE_FILM}"'"

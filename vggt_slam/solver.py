@@ -6,6 +6,8 @@ import torch
 import open3d as o3d
 import viser
 import viser.transforms as viser_tf
+import os
+import traceback
 from termcolor import colored
 from typing import Optional, Sequence
 
@@ -20,6 +22,9 @@ from vggt_slam.submap import Submap
 from vggt_slam.h_solve import ransac_projective
 from vggt_slam.gradio_viewer import TrimeshViewer
 from pipeline_check import get_pipeline_logger
+
+_SEM_RUNNER_LOGGED = False
+_SEM_ERROR_COUNT = 0
 
 def color_point_cloud_by_confidence(pcd, confidence, cmap='viridis'):
     """
@@ -493,11 +498,20 @@ class Solver:
                 model._trace_state = prev_trace_state
 
         # Optional semantic head sidecar (no effect if module/env absent)
+        global _SEM_RUNNER_LOGGED, _SEM_ERROR_COUNT
         try:
+            runner_source = "hiding_folder.semantic_runner"
             try:
                 from hiding_folder.semantic_runner import run_semantic_if_enabled
             except Exception:
+                runner_source = "vggt.heads.semantic_runner"
                 from vggt.heads.semantic_runner import run_semantic_if_enabled
+            if not _SEM_RUNNER_LOGGED:
+                print(
+                    f"[SEM runner] source={runner_source} "
+                    f"backend={os.getenv('VGGT_SEM_BACKEND', '<unset>')}"
+                )
+                _SEM_RUNNER_LOGGED = True
             device = next(model.parameters()).device
             run_semantic_if_enabled(model, predictions, device)
             sem_masks = predictions.get("sem_mask_logits")
@@ -544,8 +558,12 @@ class Solver:
                         observed="None",
                         status="warn",
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            _SEM_ERROR_COUNT += 1
+            if _SEM_ERROR_COUNT <= 5 or (_SEM_ERROR_COUNT % 50) == 0:
+                print(f"[SEM runner][WARN] failed ({_SEM_ERROR_COUNT}): {exc}")
+                if str(os.getenv("VGGT_SEM_TRACEBACK", "0")).strip().lower() in ("1", "true", "yes", "on"):
+                    traceback.print_exc()
 
         # TODO: remove FiLM delta probe after validation.
         dh = getattr(model, "depth_head", None)
