@@ -11,6 +11,7 @@ import tempfile
 import shutil
 import json
 import traceback
+import importlib
 from collections import deque
 from queue import Queue, Empty as QueueEmpty
 from dataclasses import dataclass
@@ -23,12 +24,52 @@ import cv2
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 
-# Optional: allow importing gtsam bindings from an alternate site-packages path
-# (useful when runtime python has detectron2/cv_bridge but gtsam lives in another venv).
-_GTSAM_SITEPKG = os.getenv("VGGT_GTSAM_SITEPKG", "").strip()
-if _GTSAM_SITEPKG and os.path.isdir(_GTSAM_SITEPKG) and _GTSAM_SITEPKG not in sys.path:
-    sys.path.insert(0, _GTSAM_SITEPKG)
-    print(f"[gtsam-path] prepended {_GTSAM_SITEPKG}")
+def _gtsam_ok(mod) -> bool:
+    if mod is None:
+        return False
+    if hasattr(mod, "NonlinearFactorGraph"):
+        return True
+    core = getattr(mod, "gtsam", None)
+    if core is not None and hasattr(core, "NonlinearFactorGraph"):
+        return True
+    try:
+        c = importlib.import_module("gtsam.gtsam")
+        return hasattr(c, "NonlinearFactorGraph")
+    except Exception:
+        return False
+
+
+def _bootstrap_gtsam_from_sitepkg() -> None:
+    # Optional fallback: load gtsam from a secondary site-packages path
+    # without permanently contaminating sys.path for other deps.
+    gtsam_site = os.getenv("VGGT_GTSAM_SITEPKG", "").strip()
+    if not gtsam_site or not os.path.isdir(gtsam_site):
+        return
+    try:
+        import gtsam as _gtsam  # type: ignore
+        if _gtsam_ok(_gtsam):
+            return
+    except Exception:
+        pass
+
+    old_path = list(sys.path)
+    try:
+        if gtsam_site not in sys.path:
+            sys.path.insert(0, gtsam_site)
+        sys.modules.pop("gtsam", None)
+        sys.modules.pop("gtsam.gtsam", None)
+        import gtsam as _gtsam  # type: ignore
+        if _gtsam_ok(_gtsam):
+            print(f"[gtsam-path] loaded from {gtsam_site}")
+        else:
+            print(f"[gtsam-path][WARN] gtsam loaded from {gtsam_site} but symbols still missing")
+    except Exception as exc:
+        print(f"[gtsam-path][WARN] failed fallback import from {gtsam_site}: {exc}")
+    finally:
+        sys.path[:] = old_path
+
+
+_bootstrap_gtsam_from_sitepkg()
 
 import vggt_slam.slam_utils as utils
 from vggt_slam.solver import Solver
