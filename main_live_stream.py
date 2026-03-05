@@ -490,11 +490,14 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 solver.map.update_submap_homographies(solver.graph)
             except Exception as exc:
                 print(f"[LIVE][WARN] Window processing failed at step={step_id}: {exc}")
-                traceback.print_exc()
+                if str(os.getenv("VGGT_LIVE_TRACEBACK", "0")).strip().lower() in ("1", "true", "yes", "on"):
+                    traceback.print_exc()
                 # Advance window to avoid retrying the exact same failing batch forever.
                 while len(window) > args.overlapping_window_size:
                     window.popleft()
                 last_proc_wall = now
+                if stop_event.is_set():
+                    break
                 continue
 
             loop_closure_detected = len(predictions.get("detected_loops", [])) > 0

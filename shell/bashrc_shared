@@ -630,6 +630,47 @@ stop_vggt_ingest () {
   "
 }
 
+# Graceful stop for robot pipeline tmux session.
+# Usage: stop_robot_pipeline_graceful [session] [timeout_sec]
+stop_robot_pipeline_graceful () {
+  local session="${1:-robot_pipeline}"
+  local timeout="${2:-120}"
+  local pane_target="${session}:gpu-pipeline"
+  local elapsed=0
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "[stop_robot_pipeline_graceful] tmux not found." >&2
+    return 1
+  fi
+  if ! tmux has-session -t "${session}" 2>/dev/null; then
+    echo "[stop_robot_pipeline_graceful] Session '${session}' not found."
+    return 0
+  fi
+
+  echo "[stop_robot_pipeline_graceful] Sending /stream/stop..."
+  stop_vggt_ingest /stream/stop || true
+  echo "[stop_robot_pipeline_graceful] Waiting up to ${timeout}s for '${pane_target}' to exit..."
+
+  while [ "${elapsed}" -lt "${timeout}" ]; do
+    if ! tmux has-session -t "${session}" 2>/dev/null; then
+      echo "[stop_robot_pipeline_graceful] Session exited."
+      return 0
+    fi
+    local pane_dead
+    pane_dead="$(tmux display-message -p -t "${pane_target}" "#{pane_dead}" 2>/dev/null || echo "1")"
+    if [ "${pane_dead}" = "1" ]; then
+      echo "[stop_robot_pipeline_graceful] GPU pane exited."
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+
+  echo "[stop_robot_pipeline_graceful] Timeout reached; sending Ctrl+C to gpu-pipeline."
+  tmux send-keys -t "${pane_target}" C-c || true
+  return 0
+}
+
 # Launch full robot->HPC pipeline with auto Slurm allocations in a tmux session.
 # Usage: start_robot_pipeline_tmux [args...]
 start_robot_pipeline_tmux () {
