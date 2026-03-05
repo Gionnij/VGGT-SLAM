@@ -533,6 +533,7 @@ EOF
 	    fi
 
 	    export PYTHONPATH="$HOME/vggt:'"${VGGT_SLAM_ROOT}"':'"${VGGT_SLAM_ROOT}"'/salad:'"${VGGT_SLAM_ROOT}"'/mask2former:$PYTHONPATH"
+	    export MASK2FORMER_SKIP_DATA=1
 
 	    export VGGT_ENABLE_TAPS="'"${ENABLE_TAPS}"'"
 	    export VGGT_FUSE_FILM="'"${ENABLE_FILM}"'"
