@@ -9,6 +9,7 @@ import threading
 import tempfile
 import shutil
 import json
+import traceback
 from collections import deque
 from queue import Queue, Empty as QueueEmpty
 from dataclasses import dataclass
@@ -471,21 +472,30 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 except Exception:
                     pass
 
-            # Run solver with current window
-            predictions = solver.run_predictions(
-                img_paths,
-                model,
-                args.max_loops,
-                trace_sink=trace_sink,
-                step_id=step_id,
-                frame_ids_window=frame_ids_window,
-            )
-            if demo is not None:
-                demo.export_batch(list(window), frame_ids_window, predictions)
+            # Run solver with current window; fail-soft on bad geometry windows.
+            try:
+                predictions = solver.run_predictions(
+                    img_paths,
+                    model,
+                    args.max_loops,
+                    trace_sink=trace_sink,
+                    step_id=step_id,
+                    frame_ids_window=frame_ids_window,
+                )
+                if demo is not None:
+                    demo.export_batch(list(window), frame_ids_window, predictions)
 
-            solver.add_points(predictions)
-            solver.graph.optimize()
-            solver.map.update_submap_homographies(solver.graph)
+                solver.add_points(predictions)
+                solver.graph.optimize()
+                solver.map.update_submap_homographies(solver.graph)
+            except Exception as exc:
+                print(f"[LIVE][WARN] Window processing failed at step={step_id}: {exc}")
+                traceback.print_exc()
+                # Advance window to avoid retrying the exact same failing batch forever.
+                while len(window) > args.overlapping_window_size:
+                    window.popleft()
+                last_proc_wall = now
+                continue
 
             loop_closure_detected = len(predictions.get("detected_loops", [])) > 0
             if args.vis_map:
