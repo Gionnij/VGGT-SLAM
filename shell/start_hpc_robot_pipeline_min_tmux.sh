@@ -221,8 +221,8 @@ ${GPU_ALLOC_PREFIX} bash -lc '
   export VGGT_M2F_WEIGHTS="${FWD_VGGT_M2F_WEIGHTS}"
   mkdir -p "${VGGT_DEMO_ROOT}"
   PIPELINE_LOG_FILE="${VGGT_DEMO_ROOT}/gpu_pipeline_${RUN_ID}.log"
-  echo "[gpu-pipeline] appending console log to: ${PIPELINE_LOG_FILE}"
-  run_pipeline 2>&1 | tee -a "${PIPELINE_LOG_FILE}"
+  echo "[gpu-pipeline] appending console log to: \${PIPELINE_LOG_FILE}"
+  run_pipeline 2>&1 | tee -a "\${PIPELINE_LOG_FILE}"
 '
 SCRIPT
 
