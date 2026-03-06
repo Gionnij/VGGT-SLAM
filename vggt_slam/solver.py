@@ -25,6 +25,8 @@ from pipeline_check import get_pipeline_logger
 
 _SEM_RUNNER_LOGGED = False
 _SEM_ERROR_COUNT = 0
+_SEM_LOG_COUNTER = 0
+_FILM_DELTA_COUNTER = 0
 
 
 def _gtsam_sym(name):
@@ -527,7 +529,7 @@ class Solver:
                 model._trace_state = prev_trace_state
 
         # Optional semantic head sidecar (no effect if module/env absent)
-        global _SEM_RUNNER_LOGGED, _SEM_ERROR_COUNT
+        global _SEM_RUNNER_LOGGED, _SEM_ERROR_COUNT, _SEM_LOG_COUNTER, _FILM_DELTA_COUNTER
         try:
             runner_source = "hiding_folder.semantic_runner"
             try:
@@ -549,23 +551,28 @@ class Solver:
             sem_masks = predictions.get("sem_mask_logits")
             sem_cls = predictions.get("sem_cls_logits")
             if sem_masks is not None and sem_cls is not None:
-                print("[SEM] masks:", tuple(sem_masks.shape), "cls:", tuple(sem_cls.shape))
+                _SEM_LOG_COUNTER += 1
+                sem_log_every = max(1, int(os.getenv("VGGT_SEM_LOG_EVERY", "20")))
+                should_log_sem = (_SEM_LOG_COUNTER <= 3) or ((_SEM_LOG_COUNTER % sem_log_every) == 0)
+                if should_log_sem:
+                    print("[SEM] masks:", tuple(sem_masks.shape), "cls:", tuple(sem_cls.shape))
                 # Quick numeric probe so we know tensors are non-trivial.
                 try:
                     mask_mean = float(sem_masks.mean().item())
                     mask_std = float(sem_masks.std().item())
                     cls_scores = sem_cls.softmax(dim=-1)
                     top_scores = cls_scores.max(dim=-1).values
-                    print(
-                        "[SEM stats] mask mean/std:",
-                        f"{mask_mean:.4f}",
-                        f"{mask_std:.4f}",
-                        "cls max avg:",
-                        f"{float(top_scores.mean().item()):.4f}",
-                        "cls max min/max:",
-                        f"{float(top_scores.min().item()):.4f}",
-                        f"{float(top_scores.max().item()):.4f}",
-                    )
+                    if should_log_sem:
+                        print(
+                            "[SEM stats] mask mean/std:",
+                            f"{mask_mean:.4f}",
+                            f"{mask_std:.4f}",
+                            "cls max avg:",
+                            f"{float(top_scores.mean().item()):.4f}",
+                            "cls max min/max:",
+                            f"{float(top_scores.min().item()):.4f}",
+                            f"{float(top_scores.max().item()):.4f}",
+                        )
                     if pipeline_logger:
                         pipeline_logger.log(
                             "SEMHEAD",
@@ -616,6 +623,9 @@ class Solver:
             )
         if raw_pyr and film_pyr:
             try:
+                _FILM_DELTA_COUNTER += 1
+                film_log_every = max(1, int(os.getenv("VGGT_FILM_DELTA_LOG_EVERY", "20")))
+                should_log_film = (_FILM_DELTA_COUNTER <= 3) or ((_FILM_DELTA_COUNTER % film_log_every) == 0)
                 deltas = []
                 for raw_lvl, film_lvl in zip(raw_pyr, film_pyr):
                     if raw_lvl is None or film_lvl is None:
@@ -630,7 +640,8 @@ class Solver:
                     den = ff_flat.norm(dim=1) * rr_flat.norm(dim=1) + 1e-6
                     cos = (num / den).mean().item()
                     deltas.append((mad, cos))
-                print("[FiLM Δ] per-level MAD/COS:", deltas)
+                if should_log_film:
+                    print("[FiLM Δ] per-level MAD/COS:", deltas)
                 if pipeline_logger:
                     pipeline_logger.log(
                         "FiLM",
@@ -644,7 +655,11 @@ class Solver:
                 if pipeline_logger:
                     pipeline_logger.log("FiLM", "Probe failed", observed=str(exc), status="warn")
         else:
-            print("[FiLM Δ] pyramid unavailable (raw or FiLM missing)")
+            _FILM_DELTA_COUNTER += 1
+            film_log_every = max(1, int(os.getenv("VGGT_FILM_DELTA_LOG_EVERY", "20")))
+            should_log_film = (_FILM_DELTA_COUNTER <= 3) or ((_FILM_DELTA_COUNTER % film_log_every) == 0)
+            if should_log_film:
+                print("[FiLM Δ] pyramid unavailable (raw or FiLM missing)")
             if pipeline_logger:
                 pipeline_logger.log(
                     "FiLM",

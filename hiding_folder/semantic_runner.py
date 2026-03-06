@@ -18,6 +18,8 @@ _SEM_PYRAMID_WARNED = False
 _SEM_EXPORT_WARNED = False
 _SEM_EXPORT_COUNTER = 0
 _SEM_SOURCE_LOGGED = False
+_SEM_DEBUG_COUNTER = 0
+_SEM_DEBUG_SAVED = 0
 
 
 def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -44,6 +46,99 @@ def _to_disk_dtype(x: torch.Tensor, dtype_name: str) -> torch.Tensor:
     if n in ("fp32", "float32", "full"):
         return x.to(dtype=torch.float32)
     return x.to(dtype=torch.float16)
+
+
+def _tensor_stats(x: torch.Tensor) -> Dict[str, float]:
+    x = x.detach()
+    return {
+        "mean": float(x.mean().item()),
+        "std": float(x.std().item()),
+        "min": float(x.min().item()),
+        "max": float(x.max().item()),
+    }
+
+
+def _sem_debug_trace(
+    *,
+    step_id: int,
+    dpt_source: str,
+    frame_indices: List[int],
+    dino_sel: torch.Tensor,
+    dpt_sel: List[torch.Tensor],
+    cls_logits: torch.Tensor,
+    mask_logits: torch.Tensor,
+) -> None:
+    global _SEM_DEBUG_COUNTER, _SEM_DEBUG_SAVED
+    if not _truthy(os.getenv("VGGT_SEM_DEBUG"), default=False):
+        return
+
+    every = _maybe_int(os.getenv("VGGT_SEM_DEBUG_EVERY")) or 10
+    every = max(1, int(every))
+    _SEM_DEBUG_COUNTER += 1
+    if (_SEM_DEBUG_COUNTER % every) != 0:
+        return
+
+    cls = cls_logits.detach()
+    msk = mask_logits.detach()
+    if cls.dim() >= 2 and cls.shape[-1] > 1:
+        cls_probs = cls.softmax(dim=-1)[..., :-1]
+    else:
+        cls_probs = cls
+    top = cls_probs.max(dim=-1).values if cls_probs.numel() > 0 else cls_probs
+    pred_cls = cls_probs.argmax(dim=-1).reshape(-1) if cls_probs.numel() > 0 else torch.zeros(0, device=cls.device)
+
+    topk = []
+    if pred_cls.numel() > 0:
+        uniq, cnt = torch.unique(pred_cls, return_counts=True)
+        order = torch.argsort(cnt, descending=True)[:5]
+        for i in order:
+            topk.append((int(uniq[i].item()), int(cnt[i].item())))
+
+    payload: Dict[str, Any] = {
+        "step": int(step_id),
+        "dpt_source": dpt_source,
+        "frame_indices": [int(i) for i in frame_indices],
+        "dino_shape": list(dino_sel.shape),
+        "dpt_shapes": [list(x.shape) for x in dpt_sel],
+        "cls_shape": list(cls_logits.shape),
+        "mask_shape": list(mask_logits.shape),
+        "dino_stats": _tensor_stats(dino_sel),
+        "dpt_stats": [_tensor_stats(x) for x in dpt_sel],
+        "cls_stats": _tensor_stats(cls_logits),
+        "mask_stats": _tensor_stats(mask_logits),
+        "top_score_mean": float(top.mean().item()) if top.numel() > 0 else 0.0,
+        "top_score_min": float(top.min().item()) if top.numel() > 0 else 0.0,
+        "top_score_max": float(top.max().item()) if top.numel() > 0 else 0.0,
+        "top_classes": topk,
+    }
+    print("[SEM DEBUG]", json.dumps(payload, sort_keys=True))
+
+    if not _truthy(os.getenv("VGGT_SEM_DEBUG_SAVE"), default=False):
+        return
+    save_max = _maybe_int(os.getenv("VGGT_SEM_DEBUG_SAVE_MAX")) or 3
+    save_max = max(1, int(save_max))
+    if _SEM_DEBUG_SAVED >= save_max:
+        return
+
+    root = os.getenv("VGGT_SEM_DEBUG_DIR", "").strip()
+    if not root:
+        demo_run = os.getenv("VGGT_ACTIVE_DEMO_RUN_DIR", "").strip()
+        root = str(Path(demo_run) / "semantic_debug") if demo_run else "debug/semantic_debug"
+    out_dir = Path(root).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"sem_debug_step{int(step_id):08d}_n{_SEM_DEBUG_SAVED + 1:03d}.pt"
+    torch.save(
+        {
+            "meta": payload,
+            "dino_selected": dino_sel.detach().cpu(),
+            "dpt_selected": [x.detach().cpu() for x in dpt_sel],
+            "sem_cls_logits": cls_logits.detach().cpu(),
+            "sem_mask_logits": mask_logits.detach().cpu(),
+        },
+        out_path,
+    )
+    _SEM_DEBUG_SAVED += 1
+    print(f"[SEM DEBUG] wrote snapshot: {out_path}")
 
 
 def _get_semantic_head(device: torch.device) -> SemanticHead:
@@ -422,6 +517,16 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
 
     cls_logits = cls_logits.reshape(B, len(frame_indices), *cls_logits.shape[-2:])
     mask_logits = mask_logits.reshape(B, len(frame_indices), *mask_logits.shape[-3:])
+
+    _sem_debug_trace(
+        step_id=int(predictions.get("_sem_step_id", -1)),
+        dpt_source=dpt_source,
+        frame_indices=frame_indices,
+        dino_sel=dino_sel,
+        dpt_sel=dpt_sel,
+        cls_logits=cls_logits,
+        mask_logits=mask_logits,
+    )
 
     predictions["sem_frame_indices"] = frame_indices
     predictions["sem_cls_logits"] = cls_logits
