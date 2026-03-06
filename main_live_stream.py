@@ -194,6 +194,7 @@ class DemoExporter:
         self.mask_dir = _mkdir(self.run_dir / "segmentation_masks")
         self.overlay_dir = _mkdir(self.run_dir / "segmentation_overlays")
         self.saved_seq: set[int] = set()
+        self.saved_sem_seq: set[int] = set()
         self.palette = _palette_bgr()
         self.num_saved = 0
         os.environ["VGGT_ACTIVE_DEMO_RUN_DIR"] = str(self.run_dir)
@@ -237,29 +238,29 @@ class DemoExporter:
                 depth_arr = None
 
         for i, fr in enumerate(frames):
-            if fr.seq in self.saved_seq:
-                continue
-            self.saved_seq.add(fr.seq)
-
             stem = Path(frame_ids_window[i]).stem if i < len(frame_ids_window) else f"seq_{fr.seq:08d}"
-            cv2.imwrite(str(self.rgb_dir / f"{stem}.jpg"), fr.img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            if fr.seq not in self.saved_seq:
+                self.saved_seq.add(fr.seq)
+                cv2.imwrite(str(self.rgb_dir / f"{stem}.jpg"), fr.img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
 
-            if depth_arr is not None and i < depth_arr.shape[0]:
-                d = depth_arr[i].astype(np.float32)
-                conf = None
-                if depth_conf_arr is not None and depth_conf_arr.ndim >= 3 and i < depth_conf_arr.shape[0]:
-                    conf = depth_conf_arr[i].astype(np.float32)
-                np.savez_compressed(self.depth_npz_dir / f"{stem}.npz", depth=d, confidence=conf)
-                cv2.imwrite(str(self.depth_vis_dir / f"{stem}.png"), _depth_to_vis(d))
+                if depth_arr is not None and i < depth_arr.shape[0]:
+                    d = depth_arr[i].astype(np.float32)
+                    conf = None
+                    if depth_conf_arr is not None and depth_conf_arr.ndim >= 3 and i < depth_conf_arr.shape[0]:
+                        conf = depth_conf_arr[i].astype(np.float32)
+                    np.savez_compressed(self.depth_npz_dir / f"{stem}.npz", depth=d, confidence=conf)
+                    cv2.imwrite(str(self.depth_vis_dir / f"{stem}.png"), _depth_to_vis(d))
+                self.num_saved += 1
 
-            if i in sem_by_frame_idx:
+            # Save semantic artifacts independently from RGB/depth dedup so overlap
+            # frames can still receive masks if they were produced in a later window.
+            if i in sem_by_frame_idx and fr.seq not in self.saved_sem_seq:
                 m = sem_by_frame_idx[i]
                 cv2.imwrite(str(self.mask_dir / f"{stem}.png"), m.astype(np.uint16))
                 color = self.palette[(m.astype(np.int64) % len(self.palette))]
                 overlay = cv2.addWeighted(fr.img, 0.5, color, 0.5, 0.0)
                 cv2.imwrite(str(self.overlay_dir / f"{stem}.png"), overlay)
-
-            self.num_saved += 1
+                self.saved_sem_seq.add(fr.seq)
 
     def finalize(self, solver: Solver) -> None:
         if solver.map.get_num_submaps() == 0:
@@ -831,6 +832,23 @@ def main():
                 "This usually means you passed a Fusion+Mask2Former checkpoint "
                 "(e.g., from train_film_m2f_optimized_png.py) to main_live_stream.py."
             )
+
+    # Keep depth-head side pyramids aligned with the full live window so semantic
+    # frame selection (e.g., VGGT_SEM_FRAME_MODE=all) sees all frames.
+    try:
+        dh = getattr(model, "depth_head", None)
+        if dh is not None and not getattr(dh, "_no_chunk_patch", False):
+            _orig_depth_forward = dh.forward
+
+            def _depth_forward_no_chunk(self, aggregated_tokens_list, images, patch_start_idx, *args, **kwargs):
+                kwargs["frames_chunk_size"] = None
+                return _orig_depth_forward(aggregated_tokens_list, images, patch_start_idx, *args, **kwargs)
+
+            dh.forward = _depth_forward_no_chunk.__get__(dh, type(dh))
+            setattr(dh, "_no_chunk_patch", True)
+            print("[VGGT] depth_head chunking: disabled (frames_chunk_size=None)")
+    except Exception as exc:
+        print(f"[VGGT][WARN] failed to disable depth_head chunking: {exc}")
 
     try:
         dh = getattr(model, "depth_head", None)
