@@ -465,7 +465,9 @@ _run_vggt_live_mode () {
   if [ "${mode}" = "pipeline" ]; then
     default_demo_root="${HOME}/src/VGGT-SLAM/demo"
     default_enable_taps="1"
-    default_enable_film="1"
+    # Keep depth-head FiLM off by default so semantic path matches training
+    # (raw DINO + raw DPT -> FusionMask2Former FiLM exactly once).
+    default_enable_film="0"
     default_enable_sem="1"
     default_pipeline_check="1"
     default_sem_frame_mode="all"
