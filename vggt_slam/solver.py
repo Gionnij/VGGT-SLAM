@@ -538,10 +538,13 @@ class Solver:
             if not _SEM_RUNNER_LOGGED:
                 print(
                     f"[SEM runner] source={runner_source} "
-                    f"backend={os.getenv('VGGT_SEM_BACKEND', '<unset>')}"
+                    f"backend={os.getenv('VGGT_SEM_BACKEND', '<unset>')} "
+                    f"dpt_source={os.getenv('VGGT_SEM_DPT_SOURCE', 'raw')}"
                 )
                 _SEM_RUNNER_LOGGED = True
             device = next(model.parameters()).device
+            predictions["_sem_step_id"] = int(step_id)
+            predictions["_sem_frame_ids"] = list(frame_ids_window) if frame_ids_window is not None else []
             run_semantic_if_enabled(model, predictions, device)
             sem_masks = predictions.get("sem_mask_logits")
             sem_cls = predictions.get("sem_cls_logits")

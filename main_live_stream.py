@@ -192,6 +192,7 @@ class DemoExporter:
         self.saved_seq: set[int] = set()
         self.palette = _palette_bgr()
         self.num_saved = 0
+        os.environ["VGGT_ACTIVE_DEMO_RUN_DIR"] = str(self.run_dir)
         print(f"[DEMO] Saving run artifacts to: {self.run_dir}")
 
     def export_batch(self, frames: List[Frame], frame_ids_window: List[str], predictions: dict) -> None:

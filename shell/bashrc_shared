@@ -482,8 +482,16 @@ _run_vggt_live_mode () {
   local ENABLE_FILM="${VGGT_FUSE_FILM:-${default_enable_film}}"
   local ENABLE_SEM="${VGGT_SEMANTIC_HEAD:-${default_enable_sem}}"
   local SEM_BACKEND="${VGGT_SEM_BACKEND:-fusion}"
+  local SEM_DPT_SOURCE="${VGGT_SEM_DPT_SOURCE:-raw}"
   local SEM_CLASSES="${VGGT_SEM_CLASSES:-60}"
   local SEM_QUERIES="${VGGT_SEM_QUERIES:-100}"
+  local SEM_EXPORT_EMBEDDINGS="${VGGT_SEM_EXPORT_EMBEDDINGS:-0}"
+  local SEM_EXPORT_EVERY="${VGGT_SEM_EXPORT_EVERY:-1}"
+  local SEM_EXPORT_FORMAT="${VGGT_SEM_EXPORT_FORMAT:-pt}"
+  local SEM_EXPORT_DTYPE="${VGGT_SEM_EXPORT_DTYPE:-float16}"
+  local WINDOW_SIZE="${VGGT_WINDOW_SIZE:-15}"
+  local OVERLAP_SIZE="${VGGT_OVERLAP_SIZE:-1}"
+  local TARGET_FPS="${VGGT_TARGET_FPS:-2.0}"
   local ENABLE_PIPELINE_CHECK="${VGGT_PIPELINE_CHECK:-${default_pipeline_check}}"
 
   cat > "${HOME}/.fastdds_unicast_runtime.xml" <<EOF
@@ -566,8 +574,15 @@ EOF
 
 	    export VGGT_SEMANTIC_HEAD="'"${ENABLE_SEM}"'"
 	    export VGGT_SEM_BACKEND="'"${SEM_BACKEND}"'"
+	    export VGGT_SEM_DPT_SOURCE="'"${SEM_DPT_SOURCE}"'"
 	    export VGGT_SEM_CLASSES="'"${SEM_CLASSES}"'"
 	    export VGGT_SEM_QUERIES="'"${SEM_QUERIES}"'"
+	    export VGGT_SEM_EXPORT_EMBEDDINGS="'"${SEM_EXPORT_EMBEDDINGS}"'"
+	    export VGGT_SEM_EXPORT_EVERY="'"${SEM_EXPORT_EVERY}"'"
+	    export VGGT_SEM_EXPORT_FORMAT="'"${SEM_EXPORT_FORMAT}"'"
+	    export VGGT_SEM_EXPORT_DTYPE="'"${SEM_EXPORT_DTYPE}"'"
+	    [ -n "'"${VGGT_SEM_EXPORT_DIR:-}"'" ] && export VGGT_SEM_EXPORT_DIR="'"${VGGT_SEM_EXPORT_DIR:-}"'"
+	    [ -n "'"${VGGT_SEM_EXPORT_INCLUDE_FILM:-}"'" ] && export VGGT_SEM_EXPORT_INCLUDE_FILM="'"${VGGT_SEM_EXPORT_INCLUDE_FILM:-}"'"
 
 	    export VGGT_PIPELINE_CHECK="'"${ENABLE_PIPELINE_CHECK}"'"
 	    export VGGT_PIPELINE_CHECK_PATH="debug/pipeline_check.txt"
@@ -589,6 +604,9 @@ EOF
 		    [ -n "${VGGT_DEMO_ROOT:-}" ] && echo "[run_'"${mode}"'] Demo root: ${VGGT_DEMO_ROOT}"
 		    echo "[run_'"${mode}"'] taps=${VGGT_ENABLE_TAPS} film=${VGGT_FUSE_FILM} sem=${VGGT_SEMANTIC_HEAD}"
 	    echo "[run_'"${mode}"'] sem_backend=${VGGT_SEM_BACKEND}"
+	    echo "[run_'"${mode}"'] sem_dpt_source=${VGGT_SEM_DPT_SOURCE}"
+	    echo "[run_'"${mode}"'] sem_export=${VGGT_SEM_EXPORT_EMBEDDINGS} every=${VGGT_SEM_EXPORT_EVERY} fmt=${VGGT_SEM_EXPORT_FORMAT}"
+	    echo "[run_'"${mode}"'] window=${WINDOW_SIZE} overlap=${OVERLAP_SIZE} target_fps=${TARGET_FPS}"
 	    echo "[run_'"${mode}"'] max_loops=${VGGT_MAX_LOOPS}"
 	    EXTRA_ARGS=""
 	    if [ "${VGGT_LOG_RESULTS}" = "1" ]; then
@@ -622,6 +640,8 @@ print("FiLM blend  :", os.getenv("VGGT_FUSE_FILM_BLEND"))
 print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))
 print("Sem head    :", os.getenv("VGGT_SEMANTIC_HEAD"))
 print("Sem backend :", os.getenv("VGGT_SEM_BACKEND"))
+print("Sem DPT src :", os.getenv("VGGT_SEM_DPT_SOURCE"))
+print("Sem export  :", os.getenv("VGGT_SEM_EXPORT_EMBEDDINGS"), "every", os.getenv("VGGT_SEM_EXPORT_EVERY"))
 print("Mask2Former skip data:", os.getenv("MASK2FORMER_SKIP_DATA"))
 print("gtsam site  :", os.getenv("VGGT_GTSAM_SITEPKG"))
 ok = True
@@ -685,12 +705,12 @@ if not ok:
     raise SystemExit(2)
 PY
 
-		    "${VGGT_PIPELINE_PYTHON}" "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
+	    "${VGGT_PIPELINE_PYTHON}" "'"${VGGT_SLAM_ROOT}"'/main_live_stream.py" --live \
 	      --ros_image_topic /camera/image_color \
 	      --ros_info_topic  /camera/camera_info \
 	      --ros_stop_topic "${VGGT_STOP_TOPIC}" \
-      --window_size 15 --overlapping_window_size 1 \
-		      --target_fps 2.0 --ros2_queue_size 60 \
+	      --window_size "'"${WINDOW_SIZE}"'" --overlapping_window_size "'"${OVERLAP_SIZE}"'" \
+	      --target_fps "'"${TARGET_FPS}"'" --ros2_queue_size 60 \
 	      --max_loops "${VGGT_MAX_LOOPS}" \
 	      --max-live-steps "${VGGT_MAX_LIVE_STEPS}" \
 	      --local_model "$HOME/models/VGGT-1B/model.pt" \

@@ -1,7 +1,9 @@
+import json
 import os
 import importlib.util
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -12,6 +14,10 @@ _FUSION_REGISTRY: Dict[str, torch.nn.Module] = {}
 _SEM_CONFIG_WARNED = False
 _FUSION_WARNED = False
 _FUSION_MODULE = None
+_SEM_PYRAMID_WARNED = False
+_SEM_EXPORT_WARNED = False
+_SEM_EXPORT_COUNTER = 0
+_SEM_SOURCE_LOGGED = False
 
 
 def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -21,6 +27,23 @@ def _maybe_int(value: Optional[str]) -> Optional[int]:
         return int(value)
     except ValueError:
         return None
+
+
+def _truthy(value: Optional[str], *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _to_disk_dtype(x: torch.Tensor, dtype_name: str) -> torch.Tensor:
+    n = str(dtype_name).strip().lower()
+    if n in ("fp16", "float16", "half"):
+        return x.to(dtype=torch.float16)
+    if n in ("bf16", "bfloat16"):
+        return x.to(dtype=torch.bfloat16)
+    if n in ("fp32", "float32", "full"):
+        return x.to(dtype=torch.float32)
+    return x.to(dtype=torch.float16)
 
 
 def _get_semantic_head(device: torch.device) -> SemanticHead:
@@ -137,11 +160,11 @@ def _select_frames(seq_len: int) -> Optional[List[int]]:
     return [S - 1]
 
 
-def _normalize_film_pyramid(film_pyramid) -> Optional[List[torch.Tensor]]:
-    if not isinstance(film_pyramid, (list, tuple)) or len(film_pyramid) < 4:
+def _normalize_pyramid(pyramid) -> Optional[List[torch.Tensor]]:
+    if not isinstance(pyramid, (list, tuple)) or len(pyramid) < 4:
         return None
     out: List[torch.Tensor] = []
-    for lvl in film_pyramid[:4]:
+    for lvl in pyramid[:4]:
         if lvl is None or not isinstance(lvl, torch.Tensor):
             return None
         if lvl.dim() == 4:
@@ -152,6 +175,30 @@ def _normalize_film_pyramid(film_pyramid) -> Optional[List[torch.Tensor]]:
     return out
 
 
+def _pick_dpt_source(predictions: Dict[str, Any]) -> Tuple[Optional[List[torch.Tensor]], str]:
+    """
+    Select which DPT pyramid feeds semantic inference.
+    VGGT_SEM_DPT_SOURCE:
+      - raw   -> predictions["pyramid"]   (matches offline export/training pipeline)
+      - film  -> predictions["film_pyramid"]
+      - auto  -> raw if present else film
+    """
+    mode = os.getenv("VGGT_SEM_DPT_SOURCE", "raw").strip().lower()
+    if mode not in ("raw", "film", "auto"):
+        mode = "raw"
+
+    raw = _normalize_pyramid(predictions.get("pyramid"))
+    film = _normalize_pyramid(predictions.get("film_pyramid"))
+
+    if mode == "raw":
+        return raw, "raw"
+    if mode == "film":
+        return film, "film"
+    if raw is not None:
+        return raw, "raw"
+    return film, "film"
+
+
 def _align_dino_temporal(dino_seq: torch.Tensor, target_s: int) -> torch.Tensor:
     if dino_seq.shape[1] == target_s:
         return dino_seq
@@ -159,6 +206,113 @@ def _align_dino_temporal(dino_seq: torch.Tensor, target_s: int) -> torch.Tensor:
         0, dino_seq.shape[1] - 1, steps=target_s, device=dino_seq.device, dtype=torch.float32
     ).round().long()
     return dino_seq.index_select(1, idx)
+
+
+def _maybe_export_sem_inputs(
+    *,
+    predictions: Dict[str, Any],
+    dino_sel: torch.Tensor,
+    dpt_sel: List[torch.Tensor],
+    frame_indices: List[int],
+    dpt_source: str,
+    film_selected: Optional[List[torch.Tensor]] = None,
+) -> None:
+    global _SEM_EXPORT_WARNED, _SEM_EXPORT_COUNTER
+    if not _truthy(os.getenv("VGGT_SEM_EXPORT_EMBEDDINGS"), default=False):
+        return
+
+    every = _maybe_int(os.getenv("VGGT_SEM_EXPORT_EVERY")) or 1
+    every = max(1, int(every))
+    _SEM_EXPORT_COUNTER += 1
+    if (_SEM_EXPORT_COUNTER % every) != 0:
+        return
+
+    # Prefer explicit export dir; otherwise place under current demo run.
+    root = os.getenv("VGGT_SEM_EXPORT_DIR", "").strip()
+    if not root:
+        demo_run = os.getenv("VGGT_ACTIVE_DEMO_RUN_DIR", "").strip()
+        root = str(Path(demo_run) / "semantic_inputs") if demo_run else "debug/semantic_inputs"
+    out_dir = Path(root).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    dump_dtype = os.getenv("VGGT_SEM_EXPORT_DTYPE", "float16")
+    fmt = os.getenv("VGGT_SEM_EXPORT_FORMAT", "pt").strip().lower()
+    export_film = _truthy(os.getenv("VGGT_SEM_EXPORT_INCLUDE_FILM"), default=False)
+
+    step_id = predictions.get("_sem_step_id", -1)
+    frame_ids = predictions.get("_sem_frame_ids", []) or []
+    ts = time.time()
+    stem = f"sem_inputs_step{int(step_id):08d}_n{_SEM_EXPORT_COUNTER:06d}"
+
+    # semantic runner consumes selected frames; export in [B,S,C,H,W] shape.
+    # Keep B inferred from selected tensors to avoid assumptions.
+    selected = max(1, len(frame_indices))
+    b = max(1, int(dino_sel.shape[0] // selected))
+    dino_out = _to_disk_dtype(
+        dino_sel.reshape(b, selected, *dino_sel.shape[-3:]).detach().cpu().contiguous(),
+        dump_dtype,
+    )
+    dpt_out = [
+        _to_disk_dtype(
+            lvl.reshape(b, selected, *lvl.shape[-3:]).detach().cpu().contiguous(),
+            dump_dtype,
+        )
+        for lvl in dpt_sel
+    ]
+
+    payload: Dict[str, Any] = {
+        "dino_features": dino_out,
+        "dpt_pyramid": dpt_out,
+        "meta": {
+            "step_id": int(step_id),
+            "timestamp": float(ts),
+            "frame_indices": [int(i) for i in frame_indices],
+            "frame_ids_window": [str(x) for x in frame_ids],
+            "dpt_source": dpt_source,
+            "dtype": str(dino_out.dtype).replace("torch.", ""),
+            "shapes": {
+                "dino_features": list(dino_out.shape),
+                "dpt_pyramid": [list(x.shape) for x in dpt_out],
+            },
+        },
+    }
+
+    if export_film and film_selected is not None:
+        film_out = [
+            _to_disk_dtype(
+                lvl.detach().cpu().contiguous(),
+                dump_dtype,
+            )
+            for lvl in film_selected
+        ]
+        payload["film_pyramid_selected"] = film_out
+        payload["meta"]["shapes"]["film_pyramid_selected"] = [list(x.shape) for x in film_out]
+
+    out_path = out_dir / f"{stem}.pt"
+    if fmt == "safetensors":
+        try:
+            from safetensors.torch import save_file
+
+            tensor_map: Dict[str, torch.Tensor] = {
+                "dino_features": payload["dino_features"],
+            }
+            for i, lvl in enumerate(payload["dpt_pyramid"]):
+                tensor_map[f"dpt_pyramid_{i}"] = lvl
+            if "film_pyramid_selected" in payload:
+                for i, lvl in enumerate(payload["film_pyramid_selected"]):
+                    tensor_map[f"film_pyramid_selected_{i}"] = lvl
+            out_path = out_dir / f"{stem}.safetensors"
+            save_file(tensor_map, str(out_path), metadata={"meta_json": json.dumps(payload["meta"])})
+            (out_dir / f"{stem}.json").write_text(json.dumps(payload["meta"], indent=2), encoding="utf-8")
+        except Exception as exc:
+            if not _SEM_EXPORT_WARNED:
+                print(f"[SEM export][WARN] safetensors export failed, falling back to .pt: {exc}")
+                _SEM_EXPORT_WARNED = True
+            torch.save(payload, out_path)
+    else:
+        torch.save(payload, out_path)
+
+    print(f"[SEM export] wrote semantic inputs to {out_path}")
 
 
 @torch.no_grad()
@@ -187,9 +341,19 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
         return
 
     backend = os.getenv("VGGT_SEM_BACKEND", "fusion").strip().lower()
-    film_pyramid = _normalize_film_pyramid(predictions.get("film_pyramid"))
-    if film_pyramid is None:
+    dpt_pyramid, dpt_source = _pick_dpt_source(predictions)
+    if dpt_pyramid is None:
+        global _SEM_PYRAMID_WARNED
+        if not _SEM_PYRAMID_WARNED:
+            mode = os.getenv("VGGT_SEM_DPT_SOURCE", "raw")
+            print(f"[SEM][WARN] DPT pyramid unavailable for VGGT_SEM_DPT_SOURCE={mode}")
+            _SEM_PYRAMID_WARNED = True
         return
+
+    global _SEM_SOURCE_LOGGED
+    if not _SEM_SOURCE_LOGGED:
+        print(f"[SEM] DPT source for semantic backend '{backend}': {dpt_source}")
+        _SEM_SOURCE_LOGGED = True
 
     if backend == "head":
         frame_indices = _select_frames(images.shape[1])
@@ -199,7 +363,7 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
         cls_logits, mask_logits, semantic_maps = head(
             images,
             frame_indices=frame_indices,
-            film_pyramid=film_pyramid,
+            film_pyramid=dpt_pyramid,
         )
         predictions["sem_frame_indices"] = frame_indices
         predictions["sem_cls_logits"] = cls_logits
@@ -222,8 +386,8 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
             _FUSION_WARNED = True
         return
 
-    B = film_pyramid[0].shape[0]
-    S_film = film_pyramid[0].shape[1]
+    B = dpt_pyramid[0].shape[0]
+    S_film = dpt_pyramid[0].shape[1]
     dino_seq = _align_dino_temporal(dino_seq, S_film)
     frame_indices = _select_frames(S_film)
     if not frame_indices:
@@ -231,7 +395,21 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
 
     idx = torch.as_tensor(frame_indices, dtype=torch.long, device=dino_seq.device)
     dino_sel = dino_seq.index_select(1, idx).reshape(-1, *dino_seq.shape[-3:])
-    dpt_sel = [lvl.index_select(1, idx).reshape(-1, *lvl.shape[-3:]) for lvl in film_pyramid]
+    dpt_sel = [lvl.index_select(1, idx).reshape(-1, *lvl.shape[-3:]) for lvl in dpt_pyramid]
+    film_sel = None
+    if _truthy(os.getenv("VGGT_SEM_EXPORT_INCLUDE_FILM"), default=False):
+        fp = _normalize_pyramid(predictions.get("film_pyramid"))
+        if fp is not None:
+            film_sel = [lvl.index_select(1, idx).reshape(-1, *lvl.shape[-3:]) for lvl in fp]
+
+    _maybe_export_sem_inputs(
+        predictions=predictions,
+        dino_sel=dino_sel,
+        dpt_sel=dpt_sel,
+        frame_indices=frame_indices,
+        dpt_source=dpt_source,
+        film_selected=film_sel,
+    )
 
     fusion = _get_fusion_model(device)
     H, W = int(images.shape[-2]), int(images.shape[-1])
