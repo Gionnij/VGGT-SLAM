@@ -54,6 +54,9 @@ class VGGTFeatureTapper:
         self._initialized_proj = False
         self._dino_proj: Optional[nn.Module] = None
         self._patch_size = 14  # DINOv2/VGGT default in your runs
+        self._dino_proj_payload = None
+        self._dino_proj_source = ""
+        self._dino_proj_loaded = False
 
         # Will be filled every step from main_live_stream via set_batch_meta
         self._meta: Dict = {}
@@ -94,6 +97,55 @@ class VGGTFeatureTapper:
         pe_name = "aggregator.patch_embed.patch_embed"
         if pe_name in modmap:
             self._handles.append(modmap[pe_name].register_forward_pre_hook(self._hook_input_hw(pe_name)))
+
+        proj_path = (
+            os.getenv("VGGT_DINO_PROJ_WEIGHTS", "").strip()
+            or os.getenv("VGGT_DINO_PROJ_PATH", "").strip()
+        )
+        if proj_path:
+            try:
+                payload = torch.load(proj_path, map_location="cpu")
+                if isinstance(payload, dict) and torch.is_tensor(payload.get("weight")):
+                    self._dino_proj_payload = payload
+                    self._dino_proj_source = proj_path
+                    print(f"[DINO proj] queued external projector: {proj_path}")
+                else:
+                    print(f"[DINO proj][WARN] invalid projector payload in {proj_path}; expected keys weight/bias")
+            except Exception as exc:
+                print(f"[DINO proj][WARN] failed loading {proj_path}: {exc}")
+
+    def _ensure_dino_proj(self, cin: int, device: torch.device) -> None:
+        if self._initialized_proj and self._dino_proj is not None:
+            return
+
+        proj = nn.Conv2d(cin, 256, kernel_size=1).to(device)
+        loaded = False
+        if self._dino_proj_payload is not None:
+            try:
+                w = self._dino_proj_payload.get("weight")
+                b = self._dino_proj_payload.get("bias")
+                if not torch.is_tensor(w):
+                    raise ValueError("weight missing or non-tensor")
+                if w.dim() != 4 or w.shape[0] != 256 or w.shape[2] != 1 or w.shape[3] != 1:
+                    raise ValueError(f"unexpected weight shape {tuple(w.shape)}")
+                if int(w.shape[1]) != int(cin):
+                    raise ValueError(f"in_channels mismatch: projector has {int(w.shape[1])}, live tap has {int(cin)}")
+                proj.weight.data.copy_(w.to(device=proj.weight.device, dtype=proj.weight.dtype))
+                if b is not None:
+                    if not torch.is_tensor(b) or b.dim() != 1 or b.shape[0] != 256:
+                        raise ValueError(f"unexpected bias shape {None if b is None else tuple(b.shape)}")
+                    proj.bias.data.copy_(b.to(device=proj.bias.device, dtype=proj.bias.dtype))
+                loaded = True
+            except Exception as exc:
+                print(f"[DINO proj][WARN] could not apply external projector ({self._dino_proj_source}): {exc}")
+
+        self._dino_proj = proj
+        self._initialized_proj = True
+        self._dino_proj_loaded = loaded
+        if loaded:
+            print(f"[DINO proj] loaded external projector from {self._dino_proj_source}")
+        else:
+            print("[DINO proj] using random projector initialization")
 
     # ----- hooks -----
     def _hook_tensor(self, name):
@@ -186,9 +238,7 @@ class VGGTFeatureTapper:
                     patch_tokens = tokens[:, N - dino_expected:, :]  # (B, dino_expected, C)
                     fmap = patch_tokens.transpose(1, 2).reshape(Btok, Cin, Htok, Wtok)
                     # 1x1 to 256 (lazy init)
-                    if not self._initialized_proj:
-                        self._dino_proj = nn.Conv2d(Cin, 256, kernel_size=1).to(fmap.device)
-                        self._initialized_proj = True
+                    self._ensure_dino_proj(Cin, fmap.device)
                     dino_fmap = self._dino_proj(fmap)
                     dino["p5_like"] = dino_fmap  # name it p5-like since spatial matches DPT p5 in practice
 
@@ -316,9 +366,7 @@ class VGGTFeatureTapper:
         patch_tokens = tokens[:, N - expected :, :]  # drop specials if present
         fmap = patch_tokens.transpose(1, 2).reshape(Btok, Cin, Htok, Wtok)
 
-        if not self._initialized_proj:
-            self._dino_proj = nn.Conv2d(Cin, 256, kernel_size=1).to(fmap.device)
-            self._initialized_proj = True
+        self._ensure_dino_proj(Cin, fmap.device)
         dino = self._dino_proj(fmap)
 
         # Common case: flattened (B*S, C, Htok, Wtok)
