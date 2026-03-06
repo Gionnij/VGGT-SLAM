@@ -201,6 +201,8 @@ class DPTHead(nn.Module):
         # Process frames in batches
         all_preds = []
         all_conf = []
+        all_raw_pyr: List[List[torch.Tensor]] = []
+        all_film_pyr: List[Optional[List[Optional[torch.Tensor]]]] = []
 
         for frames_start_idx in range(0, S, frames_chunk_size):
             frames_end_idx = min(frames_start_idx + frames_chunk_size, S)
@@ -217,6 +219,36 @@ class DPTHead(nn.Module):
                 )
                 all_preds.append(chunk_preds)
                 all_conf.append(chunk_conf)
+
+            # _forward_impl updates side-channel pyramids for the current chunk.
+            # Accumulate them across chunks so downstream consumers (semantic head)
+            # see the full temporal window, not only the last chunk.
+            if self.raw_pyramid is not None:
+                all_raw_pyr.append(self.raw_pyramid)
+            all_film_pyr.append(self.film_side_pyramid)
+
+        if all_raw_pyr:
+            levels = len(all_raw_pyr[0])
+            self.raw_pyramid = [torch.cat([chunk[l] for chunk in all_raw_pyr], dim=1) for l in range(levels)]
+        else:
+            self.raw_pyramid = None
+
+        if any(chunk is not None for chunk in all_film_pyr):
+            # Keep per-level tensors only when every chunk has that level populated.
+            level_count = len(next(chunk for chunk in all_film_pyr if chunk is not None))  # type: ignore[arg-type]
+            merged_film: List[Optional[torch.Tensor]] = []
+            for level_idx in range(level_count):
+                level_parts: List[torch.Tensor] = []
+                level_ok = True
+                for chunk in all_film_pyr:
+                    if chunk is None or chunk[level_idx] is None:
+                        level_ok = False
+                        break
+                    level_parts.append(chunk[level_idx])  # type: ignore[arg-type]
+                merged_film.append(torch.cat(level_parts, dim=1) if level_ok and level_parts else None)
+            self.film_side_pyramid = merged_film if any(x is not None for x in merged_film) else None
+        else:
+            self.film_side_pyramid = None
 
         # Concatenate results along the sequence dimension
         if self.feature_only:
