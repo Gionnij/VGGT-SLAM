@@ -336,7 +336,7 @@ def parse_args() -> argparse.Namespace:
         "--max-samples",
         type=int,
         default=60000,
-        help="Global cap on fit samples.",
+        help="Global cap on fit samples. Use 0 to disable the cap (process all selected chunks).",
     )
     p.add_argument(
         "--max-frames-per-chunk",
@@ -437,7 +437,8 @@ def main() -> None:
     chunk_fit_counts: Dict[str, int] = {}
     chunk_warnings: List[str] = []
 
-    max_samples = max(1, int(args.max_samples))
+    raw_max_samples = int(args.max_samples)
+    max_samples: Optional[int] = None if raw_max_samples <= 0 else raw_max_samples
     samples_per_chunk = max(1, int(args.samples_per_chunk))
     eval_per_chunk = max(0, int(args.eval_samples_per_chunk))
     max_frames_per_chunk = max(0, int(args.max_frames_per_chunk))
@@ -448,7 +449,7 @@ def main() -> None:
     total_used_chunks = 0
 
     for chunk_path in tqdm(chunk_paths, desc="Recovering"):
-        if total_fit >= max_samples:
+        if max_samples is not None and total_fit >= max_samples:
             break
         try:
             meta = _load_chunk_metadata(chunk_path)
@@ -512,7 +513,7 @@ def main() -> None:
             if total <= 0:
                 raise RuntimeError("No patch samples in chunk.")
 
-            remaining = max_samples - total_fit
+            remaining = (max_samples - total_fit) if max_samples is not None else total
             n_fit = min(samples_per_chunk, remaining, total)
             n_eval = min(eval_per_chunk, max(0, total - n_fit))
             if n_fit <= 0:
