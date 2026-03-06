@@ -151,6 +151,10 @@ def _sem_logits_to_mask_per_frame(
         return None
     sm = np.asarray(sem_mask_logits)
     sc = np.asarray(sem_cls_logits)
+    # Accept both [S,Q,H,W]/[S,Q,C] and batched [B,S,Q,H,W]/[B,S,Q,C].
+    if sm.ndim == 5 and sc.ndim == 4:
+        sm = sm.reshape(-1, *sm.shape[-3:])
+        sc = sc.reshape(-1, *sc.shape[-2:])
     if sm.ndim == 3:
         sm = sm[None, ...]
     if sc.ndim == 2:
@@ -204,9 +208,25 @@ class DemoExporter:
         depth_conf = predictions.get("depth_conf")
         sem_masks = predictions.get("sem_mask_logits")
         sem_cls = predictions.get("sem_cls_logits")
+        sem_frame_indices = predictions.get("sem_frame_indices")
 
         h0, w0 = frames[0].img.shape[:2]
         sem_per_frame = _sem_logits_to_mask_per_frame(sem_masks, sem_cls, target_hw=(h0, w0), max_frames=n)
+        sem_by_frame_idx: dict[int, np.ndarray] = {}
+        if sem_per_frame is not None:
+            if isinstance(sem_frame_indices, (list, tuple)) and len(sem_frame_indices) == len(sem_per_frame):
+                for src_i, mask in zip(sem_frame_indices, sem_per_frame):
+                    try:
+                        fi = int(src_i)
+                    except Exception:
+                        continue
+                    if 0 <= fi < n:
+                        sem_by_frame_idx[fi] = mask
+            else:
+                for fi, mask in enumerate(sem_per_frame):
+                    if fi >= n:
+                        break
+                    sem_by_frame_idx[fi] = mask
 
         depth_arr = np.asarray(depth) if depth is not None else None
         depth_conf_arr = np.asarray(depth_conf) if depth_conf is not None else None
@@ -232,8 +252,8 @@ class DemoExporter:
                 np.savez_compressed(self.depth_npz_dir / f"{stem}.npz", depth=d, confidence=conf)
                 cv2.imwrite(str(self.depth_vis_dir / f"{stem}.png"), _depth_to_vis(d))
 
-            if sem_per_frame is not None and i < len(sem_per_frame):
-                m = sem_per_frame[i]
+            if i in sem_by_frame_idx:
+                m = sem_by_frame_idx[i]
                 cv2.imwrite(str(self.mask_dir / f"{stem}.png"), m.astype(np.uint16))
                 color = self.palette[(m.astype(np.int64) % len(self.palette))]
                 overlay = cv2.addWeighted(fr.img, 0.5, color, 0.5, 0.0)
