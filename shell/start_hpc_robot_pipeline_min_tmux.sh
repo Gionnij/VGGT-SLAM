@@ -83,8 +83,13 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v sinteractive >/dev/null 2>&1; then
-  echo "[start_hpc_robot_pipeline_min_tmux] sinteractive not found in PATH." >&2
+GPU_ALLOC_PREFIX=""
+if command -v sinteractive >/dev/null 2>&1; then
+  GPU_ALLOC_PREFIX="sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
+elif command -v srun >/dev/null 2>&1; then
+  GPU_ALLOC_PREFIX="srun --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
+else
+  echo "[start_hpc_robot_pipeline_min_tmux] Neither sinteractive nor srun found in PATH." >&2
   exit 1
 fi
 
@@ -131,7 +136,7 @@ cat > "${RUN_DIR}/gpu_pipeline.sh" <<SCRIPT
 set -euo pipefail
 source "${BASHRC_SHARED}"
 echo "[gpu-pipeline] requesting GPU node..."
-sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00 bash -lc '
+${GPU_ALLOC_PREFIX} bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
   export VGGT_GPU_STATE_FILE="${STATE_FILE}"

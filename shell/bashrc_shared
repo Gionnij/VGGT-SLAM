@@ -606,7 +606,7 @@ EOF
 	    echo "[run_'"${mode}"'] sem_backend=${VGGT_SEM_BACKEND}"
 	    echo "[run_'"${mode}"'] sem_dpt_source=${VGGT_SEM_DPT_SOURCE}"
 	    echo "[run_'"${mode}"'] sem_export=${VGGT_SEM_EXPORT_EMBEDDINGS} every=${VGGT_SEM_EXPORT_EVERY} fmt=${VGGT_SEM_EXPORT_FORMAT}"
-	    echo "[run_'"${mode}"'] window=${WINDOW_SIZE} overlap=${OVERLAP_SIZE} target_fps=${TARGET_FPS}"
+	    echo "[run_'"${mode}"'] window='"${WINDOW_SIZE}"' overlap='"${OVERLAP_SIZE}"' target_fps='"${TARGET_FPS}"'"
 	    echo "[run_'"${mode}"'] max_loops=${VGGT_MAX_LOOPS}"
 	    EXTRA_ARGS=""
 	    if [ "${VGGT_LOG_RESULTS}" = "1" ]; then
