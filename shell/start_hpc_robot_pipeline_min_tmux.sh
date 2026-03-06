@@ -219,7 +219,10 @@ ${GPU_ALLOC_PREFIX} bash -lc '
   export VGGT_LOAD_BACKBONE_CKPT="${FWD_VGGT_LOAD_BACKBONE_CKPT}"
   export VGGT_M2F_CFG="${FWD_VGGT_M2F_CFG}"
   export VGGT_M2F_WEIGHTS="${FWD_VGGT_M2F_WEIGHTS}"
-  run_pipeline
+  mkdir -p "${VGGT_DEMO_ROOT}"
+  PIPELINE_LOG_FILE="${VGGT_DEMO_ROOT}/gpu_pipeline_${HPC_GPU_RUN_ID}.log"
+  echo "[gpu-pipeline] appending console log to: ${PIPELINE_LOG_FILE}"
+  run_pipeline 2>&1 | tee -a "${PIPELINE_LOG_FILE}"
 '
 SCRIPT
 
