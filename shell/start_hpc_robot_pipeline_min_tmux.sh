@@ -220,9 +220,21 @@ ${GPU_ALLOC_PREFIX} bash -lc '
   export VGGT_M2F_CFG="${FWD_VGGT_M2F_CFG}"
   export VGGT_M2F_WEIGHTS="${FWD_VGGT_M2F_WEIGHTS}"
   mkdir -p "${VGGT_DEMO_ROOT}"
-  PIPELINE_LOG_FILE="${VGGT_DEMO_ROOT}/gpu_pipeline_${RUN_ID}.log"
+  PIPELINE_LOG_FILE="${VGGT_DEMO_ROOT}/gpu_pipeline_bootstrap_${RUN_ID}.log"
+  RUN_LOG_FILE=""
   echo "[gpu-pipeline] appending console log to: \${PIPELINE_LOG_FILE}"
-  run_pipeline 2>&1 | tee -a "\${PIPELINE_LOG_FILE}"
+  run_pipeline 2>&1 | while IFS= read -r line; do
+    printf "%s\n" "\${line}"
+    printf "%s\n" "\${line}" >> "\${PIPELINE_LOG_FILE}"
+    if [ -z "\${RUN_LOG_FILE}" ] && [[ "\${line}" == "[DEMO] Saving run artifacts to: "* ]]; then
+      DEMO_RUN_DIR="\${line#"[DEMO] Saving run artifacts to: "}"
+      mkdir -p "\${DEMO_RUN_DIR}"
+      RUN_LOG_FILE="\${DEMO_RUN_DIR}/gpu_pipeline.log"
+      mv "\${PIPELINE_LOG_FILE}" "\${RUN_LOG_FILE}"
+      PIPELINE_LOG_FILE="\${RUN_LOG_FILE}"
+      echo "[gpu-pipeline] appending console log to: \${PIPELINE_LOG_FILE}"
+    fi
+  done
 '
 SCRIPT
 
