@@ -70,6 +70,38 @@ FWD_VGGT_LIVE_TEMP_PNG_COMPRESSION="${VGGT_LIVE_TEMP_PNG_COMPRESSION:-}"
 FWD_HPC_ROBOT_MAX_WIDTH="${HPC_ROBOT_MAX_WIDTH:-}"
 FWD_HPC_ROBOT_MAX_HEIGHT="${HPC_ROBOT_MAX_HEIGHT:-}"
 
+check_forwarded_env_coverage() {
+  # Build set of source env names implied by FWD_* launcher vars.
+  declare -A forwarded_names=()
+  local fwd_name src_name env_name
+  while IFS= read -r fwd_name; do
+    src_name="${fwd_name#FWD_}"
+    if [[ -n "${src_name}" ]]; then
+      forwarded_names["${src_name}"]=1
+    fi
+  done < <(compgen -A variable FWD_)
+
+  local -a missing=()
+  while IFS='=' read -r env_name _; do
+    case "${env_name}" in
+      VGGT_*|HPC_ROBOT_*)
+        if [[ -z "${forwarded_names[${env_name}]:-}" ]]; then
+          missing+=("${env_name}")
+        fi
+        ;;
+    esac
+  done < <(env | LC_ALL=C sort)
+
+  if (( ${#missing[@]} > 0 )); then
+    echo "[start_hpc_robot_pipeline_min_tmux][WARN] Exported env vars not explicitly forwarded to GPU shell:" >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    echo "[start_hpc_robot_pipeline_min_tmux][WARN] Set VGGT_STRICT_FORWARD=1 to fail fast on missing forwards." >&2
+    if [[ "${VGGT_STRICT_FORWARD:-0}" == "1" ]]; then
+      exit 1
+    fi
+  fi
+}
+
 usage() {
   cat <<USAGE
 Usage: $(basename "$0") [options]
@@ -158,6 +190,8 @@ if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
   fi
 fi
 
+check_forwarded_env_coverage
+
 RUN_DIR="${TMPDIR:-/tmp}/vggt_min_tmux_${SESSION_NAME}_$$"
 mkdir -p "${RUN_DIR}"
 rm -f "${STATE_FILE}"
@@ -235,6 +269,8 @@ ${GPU_ALLOC_PREFIX} bash -lc '
   export VGGT_LIVE_TEMP_IMAGE_FORMAT="${FWD_VGGT_LIVE_TEMP_IMAGE_FORMAT}"
   export VGGT_LIVE_TEMP_JPEG_QUALITY="${FWD_VGGT_LIVE_TEMP_JPEG_QUALITY}"
   export VGGT_LIVE_TEMP_PNG_COMPRESSION="${FWD_VGGT_LIVE_TEMP_PNG_COMPRESSION}"
+  echo "[gpu-pipeline] effective VGGT/HPC env snapshot on GPU shell:"
+  env | LC_ALL=C sort | grep -E "^(VGGT_|HPC_ROBOT_)" | sed "s/^/[gpu-env] /"
   mkdir -p "${VGGT_DEMO_ROOT}"
   PIPELINE_LOG_FILE="${VGGT_DEMO_ROOT}/gpu_pipeline_bootstrap_${RUN_ID}.log"
   RUN_LOG_FILE=""
