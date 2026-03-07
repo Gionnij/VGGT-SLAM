@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from .semantic_head import SemanticHead
 
@@ -20,6 +21,7 @@ _SEM_EXPORT_COUNTER = 0
 _SEM_SOURCE_LOGGED = False
 _SEM_DEBUG_COUNTER = 0
 _SEM_DEBUG_SAVED = 0
+_DINO_ALIGN_LOGGED = False
 
 
 def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -294,12 +296,70 @@ def _pick_dpt_source(predictions: Dict[str, Any]) -> Tuple[Optional[List[torch.T
     return film, "film"
 
 
-def _align_dino_temporal(dino_seq: torch.Tensor, target_s: int) -> torch.Tensor:
-    if dino_seq.shape[1] == target_s:
+def _temporal_cos_score(a_seq: torch.Tensor, b_seq: torch.Tensor, target_s: int) -> float:
+    """
+    Compare temporal alignment quality via mean cosine similarity between
+    global-pooled per-frame descriptors.
+    """
+    if target_s <= 0:
+        return float("-inf")
+    a = a_seq[:, :target_s]
+    b = b_seq[:, :target_s]
+    c = min(int(a.shape[2]), int(b.shape[2]))
+    if c <= 0:
+        return float("-inf")
+    a_vec = a[:, :, :c].mean(dim=(-2, -1)).reshape(-1, c)
+    b_vec = b[:, :, :c].mean(dim=(-2, -1)).reshape(-1, c)
+    a_vec = F.normalize(a_vec.float(), dim=1)
+    b_vec = F.normalize(b_vec.float(), dim=1)
+    return float((a_vec * b_vec).sum(dim=1).mean().item())
+
+
+def _align_dino_temporal(
+    dino_seq: torch.Tensor,
+    target_s: int,
+    dpt_ref: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    global _DINO_ALIGN_LOGGED
+    src_s = int(dino_seq.shape[1])
+    tgt_s = int(target_s)
+    if src_s == tgt_s:
         return dino_seq
+
+    # Some VGGT tap points expose a doubled temporal stream. In those runs, a
+    # fixed odd/even phase is often the right mapping.
+    phase_pref = os.getenv("VGGT_DINO_ALIGN_PHASE", "auto").strip().lower()
+    if src_s == (2 * tgt_s):
+        odd_idx = torch.arange(1, src_s, 2, device=dino_seq.device)[:tgt_s]
+        even_idx = torch.arange(0, src_s, 2, device=dino_seq.device)[:tgt_s]
+
+        chosen = phase_pref
+        odd_score = None
+        even_score = None
+        if chosen not in ("odd", "even"):
+            # Auto mode: pick phase that best matches DPT temporal stream.
+            if dpt_ref is not None and dpt_ref.ndim == 5 and int(dpt_ref.shape[1]) >= tgt_s:
+                odd_score = _temporal_cos_score(dino_seq.index_select(1, odd_idx), dpt_ref, tgt_s)
+                even_score = _temporal_cos_score(dino_seq.index_select(1, even_idx), dpt_ref, tgt_s)
+                chosen = "odd" if odd_score >= even_score else "even"
+            else:
+                chosen = "odd"
+
+        idx = odd_idx if chosen == "odd" else even_idx
+        if not _DINO_ALIGN_LOGGED:
+            extra = ""
+            if odd_score is not None and even_score is not None:
+                extra = f" odd_score={odd_score:.4f} even_score={even_score:.4f}"
+            print(f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} mode={chosen}{extra}")
+            _DINO_ALIGN_LOGGED = True
+        return dino_seq.index_select(1, idx)
+
     idx = torch.linspace(
-        0, dino_seq.shape[1] - 1, steps=target_s, device=dino_seq.device, dtype=torch.float32
+        0, src_s - 1, steps=tgt_s, device=dino_seq.device, dtype=torch.float32
     ).round().long()
+    if not _DINO_ALIGN_LOGGED:
+        print(f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} mode=linspace")
+        _DINO_ALIGN_LOGGED = True
     return dino_seq.index_select(1, idx)
 
 
@@ -483,7 +543,7 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
 
     B = dpt_pyramid[0].shape[0]
     S_film = dpt_pyramid[0].shape[1]
-    dino_seq = _align_dino_temporal(dino_seq, S_film)
+    dino_seq = _align_dino_temporal(dino_seq, S_film, dpt_ref=dpt_pyramid[0])
     frame_indices = _select_frames(S_film)
     if not frame_indices:
         return
