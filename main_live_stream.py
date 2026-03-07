@@ -594,6 +594,28 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 print(f"[LIVE][WARN] Window processing failed at step={step_id}: {exc}")
                 if str(os.getenv("VGGT_LIVE_TRACEBACK", "0")).strip().lower() in ("1", "true", "yes", "on"):
                     traceback.print_exc()
+                # Best-effort cleanup so failed windows do not leave large tensors
+                # pinned in hook caches across retries.
+                if tapper is not None:
+                    try:
+                        if hasattr(tapper, "_cache") and isinstance(tapper._cache, dict):
+                            tapper._cache.clear()
+                        if hasattr(tapper, "_meta") and isinstance(tapper._meta, dict):
+                            tapper._meta.clear()
+                    except Exception:
+                        pass
+                msg = str(exc).lower()
+                if "cuda" in msg and "out of memory" in msg:
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            try:
+                                torch.cuda.ipc_collect()
+                            except Exception:
+                                pass
+                            print("[LIVE][WARN] CUDA OOM recovery: cleared CUDA cache.")
+                    except Exception:
+                        pass
                 # Advance window to avoid retrying the exact same failing batch forever.
                 while len(window) > args.overlapping_window_size:
                     window.popleft()
