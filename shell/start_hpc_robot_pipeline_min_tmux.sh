@@ -53,6 +53,7 @@ FWD_VGGT_SEM_DEBUG_EVERY="${VGGT_SEM_DEBUG_EVERY:-}"
 FWD_VGGT_SEM_DEBUG_SAVE="${VGGT_SEM_DEBUG_SAVE:-}"
 FWD_VGGT_SEM_DEBUG_SAVE_MAX="${VGGT_SEM_DEBUG_SAVE_MAX:-}"
 FWD_VGGT_SEM_DEBUG_DIR="${VGGT_SEM_DEBUG_DIR:-}"
+FWD_VGGT_FUSION_SCRIPT="${VGGT_FUSION_SCRIPT:-}"
 FWD_VGGT_DINO_PROJ_WEIGHTS="${VGGT_DINO_PROJ_WEIGHTS:-}"
 FWD_VGGT_DINO_ALIGN_PHASE="${VGGT_DINO_ALIGN_PHASE:-}"
 FWD_VGGT_PIPELINE_CHECK="${VGGT_PIPELINE_CHECK:-}"
@@ -81,10 +82,29 @@ check_forwarded_env_coverage() {
     fi
   done < <(compgen -A variable FWD_)
 
+  # These are forwarded through launcher aliases/flags (not FWD_* names).
+  forwarded_names["VGGT_FINETUNE_CKPT"]=1
+  forwarded_names["VGGT_DEMO_ROOT"]=1
+  forwarded_names["VGGT_LOG_RESULTS"]=1
+  forwarded_names["VGGT_MAX_LIVE_STEPS"]=1
+  forwarded_names["VGGT_STOP_TOPIC"]=1
+  forwarded_names["HPC_ROBOT_STATS_INTERVAL"]=1
+
+  # Internal vars not meant to be forwarded to GPU runtime.
+  declare -A ignored_names=()
+  ignored_names["VGGT_SLAM_ROOT"]=1
+  ignored_names["VGGT_VENV_DIR"]=1
+  ignored_names["VGGT_STRICT_FORWARD"]=1
+  ignored_names["VGGT_GPU_STATE_FILE"]=1
+  ignored_names["HPC_GPU_RUN_ID"]=1
+
   local -a missing=()
   while IFS='=' read -r env_name _; do
     case "${env_name}" in
       VGGT_*|HPC_ROBOT_*)
+        if [[ -n "${ignored_names[${env_name}]:-}" ]]; then
+          continue
+        fi
         if [[ -z "${forwarded_names[${env_name}]:-}" ]]; then
           missing+=("${env_name}")
         fi
@@ -255,6 +275,7 @@ ${GPU_ALLOC_PREFIX} bash -lc '
   export VGGT_SEM_DEBUG_SAVE="${FWD_VGGT_SEM_DEBUG_SAVE}"
   export VGGT_SEM_DEBUG_SAVE_MAX="${FWD_VGGT_SEM_DEBUG_SAVE_MAX}"
   export VGGT_SEM_DEBUG_DIR="${FWD_VGGT_SEM_DEBUG_DIR}"
+  export VGGT_FUSION_SCRIPT="${FWD_VGGT_FUSION_SCRIPT}"
   export VGGT_DINO_PROJ_WEIGHTS="${FWD_VGGT_DINO_PROJ_WEIGHTS}"
   export VGGT_DINO_ALIGN_PHASE="${FWD_VGGT_DINO_ALIGN_PHASE}"
   export VGGT_PIPELINE_CHECK="${FWD_VGGT_PIPELINE_CHECK}"
