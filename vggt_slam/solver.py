@@ -27,6 +27,7 @@ _SEM_RUNNER_LOGGED = False
 _SEM_ERROR_COUNT = 0
 _SEM_LOG_COUNTER = 0
 _FILM_DELTA_COUNTER = 0
+_PRED_AUTOCAST_LOGGED = False
 
 
 def _gtsam_sym(name):
@@ -458,7 +459,27 @@ class Solver:
             )
 
         # print("Running inference...")
-        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        autocast_mode = str(os.getenv("VGGT_MODEL_AUTOCAST", "auto")).strip().lower()
+        if autocast_mode in ("0", "off", "false", "no", "none"):
+            use_autocast = False
+            autocast_dtype = None
+            autocast_desc = "off"
+        else:
+            use_autocast = (device == "cuda")
+            if autocast_mode == "bf16":
+                autocast_dtype = torch.bfloat16
+                autocast_desc = "bf16"
+            elif autocast_mode == "fp16":
+                autocast_dtype = torch.float16
+                autocast_desc = "fp16"
+            else:
+                autocast_dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+                autocast_desc = "auto->bf16" if autocast_dtype == torch.bfloat16 else "auto->fp16"
+
+        global _PRED_AUTOCAST_LOGGED
+        if not _PRED_AUTOCAST_LOGGED:
+            print(f"[VGGT-SLAM] model autocast mode: {autocast_desc}")
+            _PRED_AUTOCAST_LOGGED = True
         window_tensor = images
 
         # Check for loop closures
@@ -517,7 +538,10 @@ class Solver:
 
         try:
             with torch.no_grad():
-                with torch.amp.autocast(device_type="cuda", dtype=dtype):
+                if use_autocast and autocast_dtype is not None:
+                    with torch.amp.autocast(device_type="cuda", dtype=autocast_dtype):
+                        predictions = model(images)
+                else:
                     predictions = model(images)
         finally:
             if trace_sink is not None:
