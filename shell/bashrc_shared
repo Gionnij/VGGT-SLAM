@@ -116,6 +116,9 @@ pub_images_tcp () {
   local mode="${4:-loop}"
   local bind_addr="${PUB_IMAGES_TCP_BIND:-127.0.0.1}"
   local dataset_root="${PUB_IMAGES_DATASET_ROOT:-/deepstore/datasets/itc/eos/scannetpp/data}"
+  local max_width="${PUB_IMAGES_TCP_MAX_WIDTH:-960}"
+  local max_height="${PUB_IMAGES_TCP_MAX_HEIGHT:-540}"
+  local jpeg_quality="${PUB_IMAGES_TCP_QUALITY:-90}"
   local folder=""
   local sif="${HOME}/containers/ros_humble_perception.sif"
 
@@ -131,7 +134,7 @@ pub_images_tcp () {
   fi
 
   echo "[pub_images_tcp] source=${scene_or_folder} folder=${folder}"
-  echo "[pub_images_tcp] serving on ${bind_addr}:${port} at ${fps} FPS mode=${mode}"
+  echo "[pub_images_tcp] serving on ${bind_addr}:${port} at ${fps} FPS mode=${mode} max=${max_width}x${max_height} q=${jpeg_quality}"
 
   singularity exec --cleanenv "${sif}" bash -lc "
     set -eE -o pipefail
@@ -140,9 +143,9 @@ pub_images_tcp () {
       --bind '${bind_addr}' \
       --port '${port}' \
       --fps '${fps}' \
-      --max-width 960 \
-      --max-height 540 \
-      --quality 90 \
+      --max-width '${max_width}' \
+      --max-height '${max_height}' \
+      --quality '${jpeg_quality}' \
       ${loop_flag}
   "
 }
@@ -245,6 +248,8 @@ hpc_robot_bridge () {
   local stats_interval="${HPC_ROBOT_STATS_INTERVAL:-5.0}"
   local save_every="${HPC_ROBOT_SAVE_EVERY:-0}"
   local save_dir="${HPC_ROBOT_SAVE_DIR:-$HOME/src/VGGT-SLAM/robot_probe_frames}"
+  local max_width="${HPC_ROBOT_MAX_WIDTH:-960}"
+  local max_height="${HPC_ROBOT_MAX_HEIGHT:-540}"
   local use_fastdds_xml="${HPC_BRIDGE_USE_FASTDDS_XML:-0}"
   local undistort="${HPC_ROBOT_UNDISTORT:-0}"
   local undistort_alpha="${HPC_ROBOT_UNDISTORT_ALPHA:-0.0}"
@@ -282,8 +287,8 @@ hpc_robot_bridge () {
       --image-topic /camera/image_color \
       --info-topic /camera/camera_info \
       --frame-id camera \
-      --max-width 960 \
-      --max-height 540 \
+      --max-width ${max_width} \
+      --max-height ${max_height} \
       --stats-interval ${stats_interval} \
       --save-every ${save_every} \
       --save-dir ${save_dir} \
