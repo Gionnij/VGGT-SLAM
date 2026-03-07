@@ -22,6 +22,7 @@ _SEM_SOURCE_LOGGED = False
 _SEM_DEBUG_COUNTER = 0
 _SEM_DEBUG_SAVED = 0
 _DINO_ALIGN_LOGGED = False
+_SEM_DINO_SCALE_LOGGED = False
 
 
 def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -589,6 +590,13 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
     idx = torch.as_tensor(frame_indices, dtype=torch.long, device=dino_seq.device)
     dino_sel = dino_seq.index_select(1, idx).reshape(-1, *dino_seq.shape[-3:])
     dpt_sel = [lvl.index_select(1, idx).reshape(-1, *lvl.shape[-3:]) for lvl in dpt_pyramid]
+    dino_scale = float(os.getenv("VGGT_SEM_DINO_SCALE", "1.0"))
+    global _SEM_DINO_SCALE_LOGGED
+    if dino_scale != 1.0:
+        dino_sel = dino_sel * dino_scale
+        if not _SEM_DINO_SCALE_LOGGED:
+            print(f"[SEM-FUSION] applying dino scale: {dino_scale}")
+            _SEM_DINO_SCALE_LOGGED = True
     film_sel = None
     if _truthy(os.getenv("VGGT_SEM_EXPORT_INCLUDE_FILM"), default=False):
         fp = _normalize_pyramid(predictions.get("film_pyramid"))
