@@ -65,6 +65,9 @@ def _sem_debug_trace(
     step_id: int,
     dpt_source: str,
     frame_indices: List[int],
+    dino_time_indices: Optional[List[int]],
+    dino_align_mode: Optional[str],
+    dino_align_scores: Optional[Dict[str, float]],
     dino_sel: torch.Tensor,
     dpt_sel: List[torch.Tensor],
     cls_logits: torch.Tensor,
@@ -100,6 +103,9 @@ def _sem_debug_trace(
         "step": int(step_id),
         "dpt_source": dpt_source,
         "frame_indices": [int(i) for i in frame_indices],
+        "dino_time_indices": [int(i) for i in (dino_time_indices or [])],
+        "dino_align_mode": dino_align_mode,
+        "dino_align_scores": dino_align_scores,
         "dino_shape": list(dino_sel.shape),
         "dpt_shapes": [list(x.shape) for x in dpt_sel],
         "cls_shape": list(cls_logits.shape),
@@ -319,12 +325,15 @@ def _align_dino_temporal(
     dino_seq: torch.Tensor,
     target_s: int,
     dpt_ref: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, List[int], str, Optional[Dict[str, float]]]:
     global _DINO_ALIGN_LOGGED
     src_s = int(dino_seq.shape[1])
     tgt_s = int(target_s)
+    idx_list: List[int]
+    score_map: Optional[Dict[str, float]] = None
     if src_s == tgt_s:
-        return dino_seq
+        idx_list = list(range(tgt_s))
+        return dino_seq, idx_list, "identity", score_map
 
     # Some VGGT tap points expose a doubled temporal stream. In those runs, a
     # fixed odd/even phase is often the right mapping.
@@ -342,25 +351,28 @@ def _align_dino_temporal(
                 odd_score = _temporal_cos_score(dino_seq.index_select(1, odd_idx), dpt_ref, tgt_s)
                 even_score = _temporal_cos_score(dino_seq.index_select(1, even_idx), dpt_ref, tgt_s)
                 chosen = "odd" if odd_score >= even_score else "even"
+                score_map = {"odd": float(odd_score), "even": float(even_score)}
             else:
                 chosen = "odd"
 
         idx = odd_idx if chosen == "odd" else even_idx
+        idx_list = [int(x) for x in idx.detach().cpu().tolist()]
         if not _DINO_ALIGN_LOGGED:
             extra = ""
             if odd_score is not None and even_score is not None:
                 extra = f" odd_score={odd_score:.4f} even_score={even_score:.4f}"
             print(f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} mode={chosen}{extra}")
             _DINO_ALIGN_LOGGED = True
-        return dino_seq.index_select(1, idx)
+        return dino_seq.index_select(1, idx), idx_list, chosen, score_map
 
     idx = torch.linspace(
         0, src_s - 1, steps=tgt_s, device=dino_seq.device, dtype=torch.float32
     ).round().long()
+    idx_list = [int(x) for x in idx.detach().cpu().tolist()]
     if not _DINO_ALIGN_LOGGED:
         print(f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} mode=linspace")
         _DINO_ALIGN_LOGGED = True
-    return dino_seq.index_select(1, idx)
+    return dino_seq.index_select(1, idx), idx_list, "linspace", score_map
 
 
 def _maybe_export_sem_inputs(
@@ -422,6 +434,9 @@ def _maybe_export_sem_inputs(
             "step_id": int(step_id),
             "timestamp": float(ts),
             "frame_indices": [int(i) for i in frame_indices],
+            "dino_time_indices": [int(i) for i in (predictions.get("_sem_dino_time_indices") or [])],
+            "dino_align_mode": str(predictions.get("_sem_dino_align_mode") or ""),
+            "dino_align_scores": predictions.get("_sem_dino_align_scores"),
             "frame_ids_window": [str(x) for x in frame_ids],
             "dpt_source": dpt_source,
             "dtype": str(dino_out.dtype).replace("torch.", ""),
@@ -543,7 +558,12 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
 
     B = dpt_pyramid[0].shape[0]
     S_film = dpt_pyramid[0].shape[1]
-    dino_seq = _align_dino_temporal(dino_seq, S_film, dpt_ref=dpt_pyramid[0])
+    dino_seq, dino_time_indices, dino_align_mode, dino_align_scores = _align_dino_temporal(
+        dino_seq, S_film, dpt_ref=dpt_pyramid[0]
+    )
+    predictions["_sem_dino_time_indices"] = [int(i) for i in dino_time_indices]
+    predictions["_sem_dino_align_mode"] = str(dino_align_mode)
+    predictions["_sem_dino_align_scores"] = dino_align_scores
     frame_indices = _select_frames(S_film)
     if not frame_indices:
         return
@@ -582,6 +602,9 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
         step_id=int(predictions.get("_sem_step_id", -1)),
         dpt_source=dpt_source,
         frame_indices=frame_indices,
+        dino_time_indices=dino_time_indices,
+        dino_align_mode=dino_align_mode,
+        dino_align_scores=dino_align_scores,
         dino_sel=dino_sel,
         dpt_sel=dpt_sel,
         cls_logits=cls_logits,
