@@ -73,7 +73,7 @@ _bootstrap_gtsam_from_sitepkg()
 
 import vggt_slam.slam_utils as utils
 from vggt_slam.solver import Solver
-from vggt.models.vggt import VGGT
+from hiding_folder.vggt import VGGT
 from taps_runtime import attach_vggt_taps
 from trace_sink import TraceSink
 from trace_hooks import install_trace_probes
@@ -803,6 +803,12 @@ def main():
 
     print("Initializing and loading VGGT model...")
     model = VGGT()
+    try:
+        import inspect
+        model_file = inspect.getsourcefile(model.__class__) or "<unknown>"
+    except Exception:
+        model_file = "<unknown>"
+    print(f"[VGGT] implementation: {model.__class__.__module__}.{model.__class__.__name__} ({model_file})")
 
     # Prefer local weights if available (GPU nodes without internet)
     state = None
