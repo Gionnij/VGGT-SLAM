@@ -437,16 +437,34 @@ parser.add_argument("--max-live-steps", type=int, default=0,
 
 # ----------------- Temp writer shim -------------------
 def write_window_to_temp(paths_dir: str, frames: List[Frame], to_rgb: bool = False) -> List[str]:
-    """Write frames to disk and return list of file paths in the same order (JPEG q=90)."""
+    """
+    Write frames to disk and return list of file paths in the same order.
+    Controlled via env:
+      - VGGT_LIVE_TEMP_IMAGE_FORMAT: jpg|jpeg|png (default: jpg)
+      - VGGT_LIVE_TEMP_JPEG_QUALITY: 1..100 (default: 90)
+      - VGGT_LIVE_TEMP_PNG_COMPRESSION: 0..9 (default: 1)
+    """
     os.makedirs(paths_dir, exist_ok=True)
+    img_fmt = os.getenv("VGGT_LIVE_TEMP_IMAGE_FORMAT", "jpg").strip().lower()
+    if img_fmt not in ("jpg", "jpeg", "png"):
+        img_fmt = "jpg"
+    jpg_q = int(os.getenv("VGGT_LIVE_TEMP_JPEG_QUALITY", "90"))
+    jpg_q = max(1, min(100, jpg_q))
+    png_c = int(os.getenv("VGGT_LIVE_TEMP_PNG_COMPRESSION", "1"))
+    png_c = max(0, min(9, png_c))
+
     file_paths = []
     for f in frames:
         img = f.img
         if to_rgb:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        fname = f"seq_{f.seq:08d}_ts_{f.ts:.6f}.jpg"
+        ext = "png" if img_fmt == "png" else "jpg"
+        fname = f"seq_{f.seq:08d}_ts_{f.ts:.6f}.{ext}"
         path = os.path.join(paths_dir, fname)
-        cv2.imwrite(path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if img_fmt == "png":
+            cv2.imwrite(path, img, [int(cv2.IMWRITE_PNG_COMPRESSION), png_c])
+        else:
+            cv2.imwrite(path, img, [int(cv2.IMWRITE_JPEG_QUALITY), jpg_q])
         file_paths.append(path)
     return file_paths
 
@@ -485,6 +503,19 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
 
     print(f"[LIVE] Using temp dir: {tmp_dir}")
     print(f"[LIVE] Window={args.window_size} Overlap={args.overlapping_window_size} TargetFPS={args.target_fps}")
+    tmp_fmt = os.getenv("VGGT_LIVE_TEMP_IMAGE_FORMAT", "jpg").strip().lower()
+    if tmp_fmt not in ("jpg", "jpeg", "png"):
+        tmp_fmt = "jpg"
+    if tmp_fmt == "png":
+        print(
+            "[LIVE] Temp frame encoding: png "
+            f"(compression={max(0, min(9, int(os.getenv('VGGT_LIVE_TEMP_PNG_COMPRESSION', '1'))))})"
+        )
+    else:
+        print(
+            "[LIVE] Temp frame encoding: jpg "
+            f"(quality={max(1, min(100, int(os.getenv('VGGT_LIVE_TEMP_JPEG_QUALITY', '90'))))})"
+        )
 
     try:
         while True:
