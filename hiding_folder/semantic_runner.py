@@ -333,6 +333,14 @@ def _align_dino_temporal(
     score_map: Optional[Dict[str, float]] = None
     if src_s == tgt_s:
         idx_list = list(range(tgt_s))
+        if not _DINO_ALIGN_LOGGED:
+            head = idx_list[: min(6, len(idx_list))]
+            tail = idx_list[-min(6, len(idx_list)) :]
+            print(
+                f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} "
+                f"mode=identity idx_head={head} idx_tail={tail}"
+            )
+            _DINO_ALIGN_LOGGED = True
         return dino_seq, idx_list, "identity", score_map
 
     # Some VGGT tap points expose a doubled temporal stream. In those runs, a
@@ -361,7 +369,12 @@ def _align_dino_temporal(
             extra = ""
             if odd_score is not None and even_score is not None:
                 extra = f" odd_score={odd_score:.4f} even_score={even_score:.4f}"
-            print(f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} mode={chosen}{extra}")
+            head = idx_list[: min(6, len(idx_list))]
+            tail = idx_list[-min(6, len(idx_list)) :]
+            print(
+                f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} "
+                f"mode={chosen}{extra} idx_head={head} idx_tail={tail}"
+            )
             _DINO_ALIGN_LOGGED = True
         return dino_seq.index_select(1, idx), idx_list, chosen, score_map
 
@@ -370,7 +383,12 @@ def _align_dino_temporal(
     ).round().long()
     idx_list = [int(x) for x in idx.detach().cpu().tolist()]
     if not _DINO_ALIGN_LOGGED:
-        print(f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} mode=linspace")
+        head = idx_list[: min(6, len(idx_list))]
+        tail = idx_list[-min(6, len(idx_list)) :]
+        print(
+            f"[SEM-FUSION] DINO temporal align: src={src_s} tgt={tgt_s} "
+            f"mode=linspace idx_head={head} idx_tail={tail}"
+        )
         _DINO_ALIGN_LOGGED = True
     return dino_seq.index_select(1, idx), idx_list, "linspace", score_map
 
