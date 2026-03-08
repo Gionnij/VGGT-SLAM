@@ -36,14 +36,25 @@ class Submap:
         self.vggt_intrinscs = intrinsics
             
     def add_all_frames(self, frames):
-        self.frames = frames
+        if torch.is_tensor(frames):
+            # Keep long-lived submap frames on CPU to avoid cumulative GPU VRAM growth.
+            self.frames = frames.detach().cpu()
+        else:
+            self.frames = frames
 
     def add_all_depths(self, depth_maps, depth_confidence):
         self.depth_maps = depth_maps
         self.depth_confidence = depth_confidence
     
     def add_all_retrieval_vectors(self, retrieval_vectors):
-        self.retrieval_vectors = retrieval_vectors
+        if torch.is_tensor(retrieval_vectors):
+            self.retrieval_vectors = retrieval_vectors.detach().cpu()
+        elif isinstance(retrieval_vectors, (list, tuple)):
+            self.retrieval_vectors = [
+                rv.detach().cpu() if torch.is_tensor(rv) else rv for rv in retrieval_vectors
+            ]
+        else:
+            self.retrieval_vectors = retrieval_vectors
     
     def get_id(self):
         return self.submap_id
@@ -111,7 +122,7 @@ class Submap:
         self.H_world_map = H_world_map
     
     def set_all_retrieval_vectors(self, retrieval_vectors):
-        self.retrieval_vectors = retrieval_vectors
+        self.add_all_retrieval_vectors(retrieval_vectors)
     
     def set_conf_masks(self, conf_masks):
         self.conf_masks = conf_masks

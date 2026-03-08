@@ -506,6 +506,8 @@ class Solver:
         new_submap.set_last_non_loop_frame_index(images.shape[0] - 1)
         if num_loop_frames > 0:
             image_tensor = torch.stack(retrieved_frames)  # Shape (n, 3, w, h)
+            if image_tensor.device != images.device:
+                image_tensor = image_tensor.to(images.device)
             images = torch.cat([images, image_tensor], dim=0) # Shape (s+n, 3, w, h)
 
             # TODO we don't really need to store the loop closure frame again, but this makes lookup easier for the visualizer.
