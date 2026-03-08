@@ -448,6 +448,16 @@ class Solver:
         images = load_and_preprocess_images(image_names).to(device)
         # print(f"Preprocessed images shape: {images.shape}")
         print(f"[VGGT-SLAM] Batch ready: tensor shape {tuple(images.shape)}")
+        sem_target_hw = None
+        sem_hw_mode = str(os.getenv("VGGT_SEM_TARGET_HW", "model")).strip().lower()
+        if sem_hw_mode in ("original", "orig", "input"):
+            try:
+                if image_names:
+                    probe = cv2.imread(str(image_names[0]), cv2.IMREAD_COLOR)
+                    if probe is not None and probe.ndim >= 2:
+                        sem_target_hw = (int(probe.shape[0]), int(probe.shape[1]))
+            except Exception:
+                sem_target_hw = None
         pipeline_logger = get_pipeline_logger()
         if pipeline_logger:
             pipeline_logger.log(
@@ -573,6 +583,8 @@ class Solver:
             device = next(model.parameters()).device
             predictions["_sem_step_id"] = int(step_id)
             predictions["_sem_frame_ids"] = list(frame_ids_window) if frame_ids_window is not None else []
+            if sem_target_hw is not None:
+                predictions["_sem_target_hw"] = (int(sem_target_hw[0]), int(sem_target_hw[1]))
             run_semantic_if_enabled(model, predictions, device)
             sem_masks = predictions.get("sem_mask_logits")
             sem_cls = predictions.get("sem_cls_logits")

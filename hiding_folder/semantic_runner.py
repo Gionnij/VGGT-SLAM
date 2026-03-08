@@ -23,6 +23,7 @@ _SEM_DEBUG_COUNTER = 0
 _SEM_DEBUG_SAVED = 0
 _DINO_ALIGN_LOGGED = False
 _SEM_DINO_SCALE_LOGGED = False
+_SEM_TARGET_HW_WARNED = False
 _SEM_INJECT_CHUNK_KEY = ""
 _SEM_INJECT_CHUNK_FILES: List[Path] = []
 _SEM_INJECT_CHUNK_CURSOR = 0
@@ -308,6 +309,37 @@ def _pick_dpt_source(predictions: Dict[str, Any]) -> Tuple[Optional[List[torch.T
     if raw is not None:
         return raw, "raw"
     return film, "film"
+
+
+def _pick_semantic_label_shape(images: torch.Tensor, predictions: Dict[str, Any]) -> Tuple[int, int, str]:
+    h_model, w_model = int(images.shape[-2]), int(images.shape[-1])
+
+    # Debug override (highest priority)
+    h_env = _maybe_int(os.getenv("VGGT_SEM_TARGET_H"))
+    w_env = _maybe_int(os.getenv("VGGT_SEM_TARGET_W"))
+    if h_env and h_env > 0 and w_env and w_env > 0:
+        return int(h_env), int(w_env), "env_hw"
+
+    mode = os.getenv("VGGT_SEM_TARGET_HW", "model").strip().lower()
+    if mode in ("original", "orig", "input"):
+        hw = predictions.get("_sem_target_hw")
+        if isinstance(hw, (list, tuple)) and len(hw) >= 2:
+            try:
+                h = int(hw[0])
+                w = int(hw[1])
+                if h > 0 and w > 0:
+                    return h, w, "original"
+            except Exception:
+                pass
+        global _SEM_TARGET_HW_WARNED
+        if not _SEM_TARGET_HW_WARNED:
+            print(
+                f"[SEM][WARN] VGGT_SEM_TARGET_HW={mode} requested but original frame size "
+                "is unavailable; falling back to model tensor size."
+            )
+            _SEM_TARGET_HW_WARNED = True
+
+    return h_model, w_model, "model"
 
 
 def _sort_dpt_keys(keys: List[str]) -> List[str]:
@@ -772,7 +804,9 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
     )
 
     fusion = _get_fusion_model(device)
-    H, W = int(images.shape[-2]), int(images.shape[-1])
+    H, W, hw_mode = _pick_semantic_label_shape(images, predictions)
+    if _truthy(os.getenv("VGGT_SEM_DEBUG"), default=False):
+        print(f"[SEM] label_shape source={hw_mode} hw=({H},{W})")
     cls_logits, mask_logits = fusion(dino_sel, dpt_sel, label_shape=(H, W))
 
     if cls_logits.dim() == 4 and cls_logits.shape[1] == 1:
