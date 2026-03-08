@@ -687,7 +687,14 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
 
 # ----------------- Offline loop (unchanged) -----------
 def offline_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Optional[TraceSink] = None):
-    use_optical_flow_downsample = True
+    use_optical_flow_downsample = str(os.getenv("VGGT_OFFLINE_USE_FLOW_FILTER", "1")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    print(f"[OFFLINE] flow_filter={int(use_optical_flow_downsample)}")
+    demo = DemoExporter(args.demo_root) if args.demo_root else None
 
     print(f"Loading images from {args.image_folder}...")
     image_names = [f for f in glob.glob(os.path.join(args.image_folder, "*"))
@@ -698,6 +705,7 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Opt
     image_names = utils.sort_images_by_number(image_names)
     image_names = utils.downsample_images(image_names, args.downsample_factor)
     print(f"Found {len(image_names)} images")
+    seq_by_path = {p: i for i, p in enumerate(image_names)}
 
     image_names_subset = []
     data = []
@@ -744,6 +752,16 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Opt
 
             data.append(predictions["intrinsic"][:, 0, 0])
 
+            if demo is not None:
+                frames = []
+                for p in image_names_subset:
+                    img = cv2.imread(p)
+                    if img is None:
+                        continue
+                    seq = int(seq_by_path.get(p, len(frames)))
+                    frames.append(Frame(img=img, ts=float(seq), seq=seq, K=np.eye(3, dtype=np.float32)))
+                demo.export_batch(frames, frame_ids_window, predictions)
+
             solver.add_points(predictions)
             solver.graph.optimize()
             solver.map.update_submap_homographies(solver.graph)
@@ -785,6 +803,8 @@ def offline_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Opt
             x = [i] * len(values)
             plt.scatter(x, y, color=colors[i], label=f'List {i+1}')
         plt.xlabel("poses"); plt.ylabel("Focal lengths"); plt.grid(); plt.show()
+    if demo is not None:
+        demo.finalize(solver)
 
 
 # ----------------- Main -------------------------------

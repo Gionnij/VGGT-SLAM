@@ -23,6 +23,13 @@ _SEM_DEBUG_COUNTER = 0
 _SEM_DEBUG_SAVED = 0
 _DINO_ALIGN_LOGGED = False
 _SEM_DINO_SCALE_LOGGED = False
+_SEM_INJECT_CHUNK_KEY = ""
+_SEM_INJECT_CHUNK_FILES: List[Path] = []
+_SEM_INJECT_CHUNK_CURSOR = 0
+_SEM_INJECT_LAST_PATH = ""
+_SEM_INJECT_LAST_PAYLOAD: Optional[Dict[str, Any]] = None
+_SEM_INJECT_WARNED = False
+_SEM_INJECT_LOG_COUNTER = 0
 
 
 def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -303,6 +310,145 @@ def _pick_dpt_source(predictions: Dict[str, Any]) -> Tuple[Optional[List[torch.T
     return film, "film"
 
 
+def _sort_dpt_keys(keys: List[str]) -> List[str]:
+    def _key_idx(name: str) -> int:
+        tail = name.rsplit("_", 1)[-1]
+        try:
+            return int(tail)
+        except ValueError:
+            return 10**9
+
+    return sorted(keys, key=lambda k: (_key_idx(k), k))
+
+
+def _normalize_injected_tensor(x: torch.Tensor, name: str) -> torch.Tensor:
+    if not isinstance(x, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor, got {type(x)}")
+    if x.dim() == 4:
+        x = x.unsqueeze(0)
+    if x.dim() != 5:
+        raise ValueError(f"{name} must have 5 dims [B,S,C,H,W], got {tuple(x.shape)}")
+    return x.detach().cpu().contiguous()
+
+
+def _load_injected_chunk_payload(chunk_path: Path) -> Dict[str, Any]:
+    suffix = chunk_path.suffix.lower()
+    meta: Dict[str, Any] = {}
+
+    if suffix == ".safetensors":
+        from safetensors.torch import load_file
+
+        tensors = load_file(str(chunk_path))
+        sidecar = chunk_path.with_suffix(".json")
+        if sidecar.is_file():
+            try:
+                meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+
+        keys = meta.get("dpt_pyramid_keys")
+        if not isinstance(keys, list) or len(keys) == 0:
+            keys = _sort_dpt_keys([k for k in tensors.keys() if k.startswith("dpt_pyramid_")])
+        if "dino_features" not in tensors:
+            raise KeyError(f"'dino_features' missing in {chunk_path}")
+        if not keys:
+            raise KeyError(f"No dpt_pyramid_* keys found in {chunk_path}")
+
+        dino = _normalize_injected_tensor(tensors["dino_features"], "dino_features")
+        dpt = [_normalize_injected_tensor(tensors[k], k) for k in keys]
+    else:
+        payload = torch.load(str(chunk_path), map_location="cpu")
+        if not isinstance(payload, dict):
+            raise TypeError(f"Unexpected payload type in {chunk_path}: {type(payload)}")
+        if "dino_features" not in payload or "dpt_pyramid" not in payload:
+            raise KeyError(f"Missing dino_features/dpt_pyramid in {chunk_path}")
+        dino = _normalize_injected_tensor(payload["dino_features"], "dino_features")
+        pyr = payload["dpt_pyramid"]
+        if not isinstance(pyr, (list, tuple)) or len(pyr) < 4:
+            raise ValueError(f"Unexpected dpt_pyramid structure in {chunk_path}")
+        dpt = [_normalize_injected_tensor(x, f"dpt_pyramid_{i}") for i, x in enumerate(pyr[:4])]
+        raw_meta = payload.get("meta")
+        if isinstance(raw_meta, dict):
+            meta = raw_meta
+
+    return {
+        "dino_features": dino,
+        "dpt_pyramid": dpt,
+        "meta": meta,
+    }
+
+
+def _resolve_injected_chunk_files(root_dir: Path, chunk_format: str) -> List[Path]:
+    pt_files = sorted(p for p in root_dir.glob("*.pt") if p.is_file())
+    st_files = sorted(p for p in root_dir.glob("*.safetensors") if p.is_file())
+
+    fmt = chunk_format.strip().lower()
+    if fmt == "pt":
+        return pt_files
+    if fmt == "safetensors":
+        return st_files
+
+    # auto: prefer safetensors when available
+    return st_files if st_files else pt_files
+
+
+def _maybe_get_injected_sem_inputs() -> Optional[Dict[str, Any]]:
+    root = os.getenv("VGGT_SEM_INJECT_CHUNK_DIR", "").strip()
+    if not root:
+        return None
+
+    global _SEM_INJECT_CHUNK_KEY, _SEM_INJECT_CHUNK_FILES, _SEM_INJECT_CHUNK_CURSOR
+    global _SEM_INJECT_LAST_PATH, _SEM_INJECT_LAST_PAYLOAD, _SEM_INJECT_WARNED, _SEM_INJECT_LOG_COUNTER
+
+    chunk_format = os.getenv("VGGT_SEM_INJECT_CHUNK_FORMAT", "auto").strip().lower()
+    key = f"{root}|{chunk_format}"
+    if key != _SEM_INJECT_CHUNK_KEY:
+        _SEM_INJECT_CHUNK_KEY = key
+        _SEM_INJECT_CHUNK_FILES = _resolve_injected_chunk_files(Path(root).expanduser(), chunk_format)
+        _SEM_INJECT_CHUNK_CURSOR = max(0, _maybe_int(os.getenv("VGGT_SEM_INJECT_START_INDEX")) or 0)
+        _SEM_INJECT_LAST_PATH = ""
+        _SEM_INJECT_LAST_PAYLOAD = None
+        _SEM_INJECT_WARNED = False
+        _SEM_INJECT_LOG_COUNTER = 0
+
+    if not _SEM_INJECT_CHUNK_FILES:
+        if not _SEM_INJECT_WARNED:
+            print(
+                f"[SEM inject][WARN] No chunk files found in {root} "
+                f"(format={chunk_format}); falling back to live embeddings."
+            )
+            _SEM_INJECT_WARNED = True
+        return None
+
+    fixed_index = _maybe_int(os.getenv("VGGT_SEM_INJECT_CHUNK_INDEX"))
+    if fixed_index is not None:
+        idx = max(0, min(len(_SEM_INJECT_CHUNK_FILES) - 1, int(fixed_index)))
+    else:
+        idx = _SEM_INJECT_CHUNK_CURSOR % len(_SEM_INJECT_CHUNK_FILES)
+        _SEM_INJECT_CHUNK_CURSOR += 1
+
+    chunk_path = _SEM_INJECT_CHUNK_FILES[idx]
+    chunk_path_str = str(chunk_path)
+    if _SEM_INJECT_LAST_PAYLOAD is None or _SEM_INJECT_LAST_PATH != chunk_path_str:
+        _SEM_INJECT_LAST_PAYLOAD = _load_injected_chunk_payload(chunk_path)
+        _SEM_INJECT_LAST_PATH = chunk_path_str
+
+    _SEM_INJECT_LOG_COUNTER += 1
+    should_log = (_SEM_INJECT_LOG_COUNTER <= 3) or ((_SEM_INJECT_LOG_COUNTER % 25) == 0)
+    if should_log:
+        dino_shape = tuple(_SEM_INJECT_LAST_PAYLOAD["dino_features"].shape)
+        s = int(dino_shape[1]) if len(dino_shape) > 1 else 0
+        print(
+            f"[SEM inject] chunk={chunk_path.name} idx={idx} "
+            f"frames={s} format={chunk_path.suffix.lstrip('.') or 'pt'}"
+        )
+
+    return {
+        "path": chunk_path,
+        "payload": _SEM_INJECT_LAST_PAYLOAD,
+    }
+
+
 def _temporal_cos_score(a_seq: torch.Tensor, b_seq: torch.Tensor, target_s: int) -> float:
     """
     Compare temporal alignment quality via mean cosine similarity between
@@ -530,14 +676,23 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
         return
 
     backend = os.getenv("VGGT_SEM_BACKEND", "fusion").strip().lower()
-    dpt_pyramid, dpt_source = _pick_dpt_source(predictions)
-    if dpt_pyramid is None:
-        global _SEM_PYRAMID_WARNED
-        if not _SEM_PYRAMID_WARNED:
-            mode = os.getenv("VGGT_SEM_DPT_SOURCE", "raw")
-            print(f"[SEM][WARN] DPT pyramid unavailable for VGGT_SEM_DPT_SOURCE={mode}")
-            _SEM_PYRAMID_WARNED = True
-        return
+
+    injected = _maybe_get_injected_sem_inputs() if backend == "fusion" else None
+    if injected is not None:
+        payload = injected["payload"]
+        dpt_pyramid = [
+            lvl.to(device=device, non_blocking=True) for lvl in payload["dpt_pyramid"]
+        ]
+        dpt_source = f"injected:{Path(injected['path']).name}"
+    else:
+        dpt_pyramid, dpt_source = _pick_dpt_source(predictions)
+        if dpt_pyramid is None:
+            global _SEM_PYRAMID_WARNED
+            if not _SEM_PYRAMID_WARNED:
+                mode = os.getenv("VGGT_SEM_DPT_SOURCE", "raw")
+                print(f"[SEM][WARN] DPT pyramid unavailable for VGGT_SEM_DPT_SOURCE={mode}")
+                _SEM_PYRAMID_WARNED = True
+            return
 
     global _SEM_SOURCE_LOGGED
     if not _SEM_SOURCE_LOGGED:
@@ -560,20 +715,24 @@ def run_semantic_if_enabled(model, predictions: dict, device: torch.device) -> N
         predictions["semantic_maps"] = semantic_maps
         return
 
-    global _FUSION_WARNED
-    tapper = getattr(model, "_feature_tapper", None)
-    if tapper is None or not hasattr(tapper, "extract_dino_fmap"):
-        if not _FUSION_WARNED:
-            print("[SEM-FUSION] Missing feature tapper; cannot extract live DINO fmap.")
-            _FUSION_WARNED = True
-        return
+    dino_seq: Optional[torch.Tensor]
+    if injected is not None:
+        dino_seq = injected["payload"]["dino_features"].to(device=device, non_blocking=True)
+    else:
+        global _FUSION_WARNED
+        tapper = getattr(model, "_feature_tapper", None)
+        if tapper is None or not hasattr(tapper, "extract_dino_fmap"):
+            if not _FUSION_WARNED:
+                print("[SEM-FUSION] Missing feature tapper; cannot extract live DINO fmap.")
+                _FUSION_WARNED = True
+            return
 
-    dino_seq = tapper.extract_dino_fmap(tuple(images.shape))
-    if dino_seq is None or dino_seq.ndim != 5:
-        if not _FUSION_WARNED:
-            print("[SEM-FUSION] Unable to extract DINO fmap from current batch.")
-            _FUSION_WARNED = True
-        return
+        dino_seq = tapper.extract_dino_fmap(tuple(images.shape))
+        if dino_seq is None or dino_seq.ndim != 5:
+            if not _FUSION_WARNED:
+                print("[SEM-FUSION] Unable to extract DINO fmap from current batch.")
+                _FUSION_WARNED = True
+            return
 
     B = dpt_pyramid[0].shape[0]
     S_film = dpt_pyramid[0].shape[1]
