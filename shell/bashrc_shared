@@ -488,6 +488,7 @@ _run_vggt_live_mode () {
   local MAX_LIVE_STEPS="${VGGT_MAX_LIVE_STEPS:-0}"
   local MAX_LOOPS="${VGGT_MAX_LOOPS:-1}"
   local ENABLE_TAPS="${VGGT_ENABLE_TAPS:-${default_enable_taps}}"
+  local TAPS_CAPTURE_DPT="${VGGT_TAPS_CAPTURE_DPT:-1}"
   local ENABLE_FILM="${VGGT_FUSE_FILM:-${default_enable_film}}"
   local ENABLE_SEM="${VGGT_SEMANTIC_HEAD:-${default_enable_sem}}"
   local SEM_BACKEND="${VGGT_SEM_BACKEND:-fusion}"
@@ -590,6 +591,7 @@ EOF
 	    export MASK2FORMER_SKIP_DATA=1
 
 	    export VGGT_ENABLE_TAPS="'"${ENABLE_TAPS}"'"
+	    export VGGT_TAPS_CAPTURE_DPT="'"${TAPS_CAPTURE_DPT}"'"
 	    export VGGT_FUSE_FILM="'"${ENABLE_FILM}"'"
 	    export VGGT_FUSE_FILM_BLEND=0
 	    export VGGT_FUSE_FILM_MODE=passive
@@ -643,7 +645,7 @@ EOF
 	    [ -n "${VGGT_FINETUNE_CKPT:-}" ] && echo "[run_'"${mode}"'] Fine-tune checkpoint: ${VGGT_FINETUNE_CKPT}"
 	    [ -n "${VGGT_M2F_WEIGHTS:-}" ] && echo "[run_'"${mode}"'] Semantic weights: ${VGGT_M2F_WEIGHTS}"
 		    [ -n "${VGGT_DEMO_ROOT:-}" ] && echo "[run_'"${mode}"'] Demo root: ${VGGT_DEMO_ROOT}"
-		    echo "[run_'"${mode}"'] taps=${VGGT_ENABLE_TAPS} film=${VGGT_FUSE_FILM} sem=${VGGT_SEMANTIC_HEAD}"
+		    echo "[run_'"${mode}"'] taps=${VGGT_ENABLE_TAPS} taps_capture_dpt=${VGGT_TAPS_CAPTURE_DPT} film=${VGGT_FUSE_FILM} sem=${VGGT_SEMANTIC_HEAD}"
 	    echo "[run_'"${mode}"'] sem_backend=${VGGT_SEM_BACKEND}"
 	    echo "[run_'"${mode}"'] sem_dpt_source=${VGGT_SEM_DPT_SOURCE}"
 	    echo "[run_'"${mode}"'] sem_frame_mode=${VGGT_SEM_FRAME_MODE}"
@@ -685,6 +687,7 @@ import importlib
 print("python:", sys.executable)
 print("CUDA:", torch.version.cuda, "GPU?", torch.cuda.is_available())
 print("Taps enabled:", os.getenv("VGGT_ENABLE_TAPS"))
+print("Taps DPT cap:", os.getenv("VGGT_TAPS_CAPTURE_DPT"))
 print("FiLM enabled:", os.getenv("VGGT_FUSE_FILM"))
 print("FiLM blend  :", os.getenv("VGGT_FUSE_FILM_BLEND"))
 print("FiLM hidden :", os.getenv("VGGT_FUSE_FILM_HIDDEN"))

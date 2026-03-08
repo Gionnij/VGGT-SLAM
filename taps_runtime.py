@@ -47,6 +47,12 @@ class VGGTFeatureTapper:
         self.model = model
         self.capture_every = max(1, int(capture_every))
         self.save_small = bool(save_small_tensors)
+        self.capture_dpt = str(os.getenv("VGGT_TAPS_CAPTURE_DPT", "1")).strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
         self.writer = _AsyncWriter(Path(logdir) / "taps.jsonl")
         self._handles: List[torch.utils.hooks.RemovableHandle] = []
         self._cache: Dict[str, torch.Tensor] = {}
@@ -80,10 +86,13 @@ class VGGTFeatureTapper:
         # Register hooks
         modmap = {n: m for n, m in self.model.named_modules()}
         # DPT
-        for nm in self.dpt_taps.values():
-            if nm not in modmap:
-                raise KeyError(f"[VGGTFeatureTapper] Missing DPT tap: {nm}")
-            self._handles.append(modmap[nm].register_forward_hook(self._hook_tensor(nm)))
+        if self.capture_dpt:
+            for nm in self.dpt_taps.values():
+                if nm not in modmap:
+                    raise KeyError(f"[VGGTFeatureTapper] Missing DPT tap: {nm}")
+                self._handles.append(modmap[nm].register_forward_hook(self._hook_tensor(nm)))
+        else:
+            print("[TAPS] DPT tap capture disabled (VGGT_TAPS_CAPTURE_DPT=0)")
         # DINO
         for cand in self.dino_candidates:
             if cand in modmap:
