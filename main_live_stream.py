@@ -109,12 +109,15 @@ def _now_tag() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
 
-def _palette_bgr(n: int = 2048) -> np.ndarray:
-    idx = np.arange(n, dtype=np.uint32)
-    b = (idx * 37 + 17) % 255
-    g = (idx * 73 + 29) % 255
-    r = (idx * 109 + 53) % 255
-    return np.stack([b, g, r], axis=1).astype(np.uint8)
+def _eval_palette_bgr(n: int = 2048, seed: int = 123) -> np.ndarray:
+    """
+    Match tools/eval_film_m2f.py palette generation (RGB randint with fixed seed)
+    and convert to BGR for OpenCV overlay compositing.
+    """
+    g = torch.Generator()
+    g.manual_seed(int(seed))
+    rgb = torch.randint(0, 256, (int(n), 3), dtype=torch.uint8, generator=g).cpu().numpy()
+    return rgb[:, ::-1].copy()
 
 
 def _depth_to_vis(depth: np.ndarray) -> np.ndarray:
@@ -193,7 +196,7 @@ class DemoExporter:
         self.overlay_dir = _mkdir(self.run_dir / "segmentation_overlays")
         self.saved_seq: set[int] = set()
         self.saved_sem_seq: set[int] = set()
-        self.palette = _palette_bgr()
+        self.palette = _eval_palette_bgr()
         self.num_saved = 0
         os.environ["VGGT_ACTIVE_DEMO_RUN_DIR"] = str(self.run_dir)
         print(f"[DEMO] Saving run artifacts to: {self.run_dir}")
