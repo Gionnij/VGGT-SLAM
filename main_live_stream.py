@@ -109,12 +109,6 @@ def _now_tag() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
 
-def _softmax_np(x: np.ndarray, axis: int = -1) -> np.ndarray:
-    x = x - np.max(x, axis=axis, keepdims=True)
-    ex = np.exp(x)
-    return ex / np.clip(np.sum(ex, axis=axis, keepdims=True), 1e-8, None)
-
-
 def _palette_bgr(n: int = 2048) -> np.ndarray:
     idx = np.arange(n, dtype=np.uint32)
     b = (idx * 37 + 17) % 255
@@ -167,12 +161,16 @@ def _sem_logits_to_mask_per_frame(
         return None
     sm = sm[:S]
     sc = sc[:S]
-    if sc.shape[-1] > 1:
-        sc = sc[..., :-1]  # drop no-object class
-    cls = _softmax_np(sc, axis=-1)
-    mask_prob = 1.0 / (1.0 + np.exp(-sm))
-    dense = np.einsum("sqc,sqhw->schw", cls, mask_prob)
-    pred = np.argmax(dense, axis=1).astype(np.uint16)  # (S,H,W)
+    # Match eval/train post-process numerics (torch softmax/sigmoid + einsum),
+    # avoiding fp16 NumPy exp overflow in live logs.
+    sm_t = torch.as_tensor(sm, dtype=torch.float32)
+    sc_t = torch.as_tensor(sc, dtype=torch.float32)
+    if sc_t.shape[-1] > 1:
+        sc_t = sc_t[..., :-1]  # drop no-object class
+    cls_prob = torch.softmax(sc_t, dim=-1)
+    mask_prob = torch.sigmoid(sm_t)
+    dense = torch.einsum("sqc,sqhw->schw", cls_prob, mask_prob)
+    pred = dense.argmax(dim=1).to(torch.uint16).cpu().numpy()  # (S,H,W)
 
     th, tw = target_hw
     out = []
