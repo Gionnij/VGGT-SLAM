@@ -89,6 +89,30 @@ def _collect_checkpoints(ckpt_dir: Path) -> List[Path]:
     return [p for _, _, _, p in entries]
 
 
+def _select_checkpoints(checkpoints: Sequence[Path], mode: str) -> List[Path]:
+    mode = str(mode).strip().lower()
+    if mode == "all":
+        return list(checkpoints)
+    if mode != "epoch-end":
+        raise ValueError(f"Unknown checkpoint selection mode: {mode}")
+
+    selected: List[Path] = []
+    seen_epochs: Set[int] = set()
+    unknown: List[Path] = []
+    for ckpt in checkpoints:
+        epoch, _step = _parse_epoch_step_from_name(ckpt.name)
+        if epoch < 0:
+            unknown.append(ckpt)
+            continue
+        if epoch in seen_epochs:
+            continue
+        seen_epochs.add(epoch)
+        selected.append(ckpt)
+    # Keep unparseable names at the end.
+    selected.extend(unknown)
+    return selected
+
+
 def _extract_model_state(payload: Dict) -> Dict[str, torch.Tensor]:
     if isinstance(payload, dict) and "model_state" in payload and isinstance(payload["model_state"], dict):
         return payload["model_state"]
@@ -355,6 +379,12 @@ def main() -> None:
     ap.add_argument("--focal-alpha", type=float, default=0.25)
     ap.add_argument("--focal-gamma", type=float, default=2.0)
     ap.add_argument("--checkpoint-dir", required=True)
+    ap.add_argument(
+        "--checkpoint-select",
+        choices=["all", "epoch-end"],
+        default="all",
+        help="all: evaluate every .pt file. epoch-end: keep latest step per epoch only.",
+    )
     ap.add_argument("--max-checkpoints", type=int, default=0, help="0 = no limit")
     ap.add_argument("--sort-by", choices=["miou", "pixel_acc", "val_loss"], default="miou")
     ap.add_argument("--sort-order", choices=["auto", "asc", "desc"], default="auto")
@@ -446,7 +476,14 @@ def main() -> None:
     )
 
     ckpt_dir = Path(args.checkpoint_dir).expanduser()
-    checkpoints = _collect_checkpoints(ckpt_dir)
+    all_checkpoints = _collect_checkpoints(ckpt_dir)
+    if not all_checkpoints:
+        raise RuntimeError(f"No checkpoints found in {ckpt_dir}")
+    checkpoints = _select_checkpoints(all_checkpoints, args.checkpoint_select)
+    print(
+        f"[info] checkpoints found={len(all_checkpoints)} "
+        f"selected={len(checkpoints)} mode={args.checkpoint_select}"
+    )
     if args.max_checkpoints and args.max_checkpoints > 0:
         checkpoints = checkpoints[: args.max_checkpoints]
     if not checkpoints:
@@ -521,6 +558,8 @@ def main() -> None:
             "num_scenes": len(scenes) if scenes is not None else None,
             "num_samples": len(ds),
             "num_checkpoints": len(ranked),
+            "num_checkpoints_found": len(all_checkpoints),
+            "checkpoint_select": args.checkpoint_select,
             "sort_by": args.sort_by,
             "sort_order": "desc" if reverse else "asc",
             "results": ranked,
