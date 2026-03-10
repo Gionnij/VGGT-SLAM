@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import re
-from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -73,20 +73,87 @@ def _colorize_mask(mask: torch.Tensor, palette: torch.Tensor, ignore_index: int)
     return Image.fromarray(out, mode="RGB")
 
 
+def _parse_epoch_step_from_name(name: str) -> Tuple[int, int]:
+    m = re.search(r"epoch(\d+)_step(\d+)", name)
+    if not m:
+        return -1, -1
+    return int(m.group(1)), int(m.group(2))
+
+
 def _collect_checkpoints(ckpt_dir: Path) -> List[Path]:
-    ckpt_re = re.compile(r"epoch(\d+)_step(\d+)")
     entries: List[Tuple[int, int, float, Path]] = []
     for p in ckpt_dir.glob("*.pt"):
-        m = ckpt_re.search(p.name)
-        if m:
-            epoch = int(m.group(1))
-            step = int(m.group(2))
-        else:
-            epoch = -1
-            step = -1
+        epoch, step = _parse_epoch_step_from_name(p.name)
         entries.append((epoch, step, p.stat().st_mtime, p))
     entries.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
     return [p for _, _, _, p in entries]
+
+
+def _extract_model_state(payload: Dict) -> Dict[str, torch.Tensor]:
+    if isinstance(payload, dict) and "model_state" in payload and isinstance(payload["model_state"], dict):
+        return payload["model_state"]
+    if isinstance(payload, dict) and "state_dict" in payload and isinstance(payload["state_dict"], dict):
+        return payload["state_dict"]
+    if isinstance(payload, dict) and "model" in payload and isinstance(payload["model"], dict):
+        return payload["model"]
+    if isinstance(payload, dict):
+        return payload
+    raise RuntimeError(f"Unsupported checkpoint format: {type(payload)}")
+
+
+def _resolve_rgb_path(frame_path: str, scene_id: str, dataset_root: Path) -> Optional[Path]:
+    fpath = Path(frame_path)
+    basename = fpath.name
+    candidates = [
+        fpath,
+        dataset_root / scene_id / "images" / basename,
+        dataset_root / scene_id / "rgb" / basename,
+        dataset_root / scene_id / "dslr" / "resized_undistorted_images" / basename,
+    ]
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _build_export_indices(total_samples: int, export_samples: int) -> List[int]:
+    n = int(total_samples)
+    k = max(0, int(export_samples))
+    if n <= 0 or k <= 0:
+        return []
+    if k == 1:
+        return [0]
+    if k >= n:
+        return list(range(n))
+    max_pos = n - 1
+    picks = set()
+    for i in range(k):
+        idx = int(round(i * max_pos / (k - 1)))
+        picks.add(idx)
+    return sorted(picks)
+
+
+def _write_csv(path: Path, rows: Sequence[Dict]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "rank",
+        "checkpoint",
+        "checkpoint_name",
+        "epoch",
+        "step",
+        "val_loss",
+        "miou",
+        "pixel_acc",
+        "num_samples",
+        "num_batches",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k) for k in fieldnames})
 
 
 def collate_fn_eval(batch: List[Dict]) -> Dict:
@@ -120,6 +187,8 @@ def evaluate_checkpoint(
     export_raw: bool,
     export_indices: Sequence[int],
     export_dir: Path,
+    dataset_root: Path,
+    overlay_alpha: float,
 ) -> Dict[str, float]:
     model.eval()
     loss_sum = 0.0
@@ -132,6 +201,12 @@ def evaluate_checkpoint(
 
     total_samples = len(dl.dataset)
     sample_idx = 0
+    exported = 0
+    image_mod = None
+    if export_masks:
+        from PIL import Image
+
+        image_mod = Image
 
     with torch.no_grad():
         for batch in dl:
@@ -174,8 +249,8 @@ def evaluate_checkpoint(
             if export_masks:
                 for bi in range(preds.shape[0]):
                     if sample_idx in export_indices_set and sample_idx not in seen_exports:
-                        scene_id = batch["scene_ids"][bi]
-                        frame_path = Path(batch["frame_paths"][bi]).name
+                        scene_id = str(batch["scene_ids"][bi])
+                        frame_token = Path(str(batch["frame_paths"][bi])).stem
                         pred_down = preds[bi : bi + 1].float()
                         pred_up = F.interpolate(
                             pred_down.unsqueeze(1),
@@ -190,22 +265,43 @@ def evaluate_checkpoint(
                         pred_img = _colorize_mask(pred_mask, palette, ignore_index)
 
                         export_dir.mkdir(parents=True, exist_ok=True)
-                        gt_img.save(export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_gt.png")
-                        pred_img.save(export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_pred.png")
-                        if export_dir and export_dir.is_dir() and export_masks and export_raw:
-                            # Save raw label ids as uint16 PNGs for exact inspection.
+                        base = f"sample_{sample_idx:06d}_{scene_id}_{frame_token}"
+                        gt_img.save(export_dir / f"{base}_gt.png")
+                        pred_img.save(export_dir / f"{base}_pred.png")
+
+                        rgb_path = _resolve_rgb_path(
+                            str(batch["frame_paths"][bi]),
+                            scene_id,
+                            dataset_root,
+                        )
+                        rgb_img = None
+                        if rgb_path is not None:
+                            try:
+                                rgb_img = image_mod.open(rgb_path).convert("RGB") if image_mod else None
+                            except Exception:
+                                rgb_img = None
+                        if rgb_img is not None:
+                            rgb_img.save(export_dir / f"{base}_rgb.png")
+                            pred_for_overlay = pred_img
+                            if pred_for_overlay.size != rgb_img.size:
+                                pred_for_overlay = pred_for_overlay.resize(rgb_img.size, image_mod.NEAREST)
+                            overlay = image_mod.blend(
+                                rgb_img,
+                                pred_for_overlay,
+                                alpha=max(0.0, min(1.0, float(overlay_alpha))),
+                            )
+                            overlay.save(export_dir / f"{base}_overlay.png")
+
+                        if export_raw:
                             import numpy as np
                             from PIL import Image
 
                             gt_raw = gt_mask.cpu().numpy().astype(np.uint16)
                             pred_raw = pred_mask.cpu().numpy().astype(np.uint16)
-                            Image.fromarray(gt_raw, mode="I;16").save(
-                                export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_gt_id.png"
-                            )
-                            Image.fromarray(pred_raw, mode="I;16").save(
-                                export_dir / f"sample_{sample_idx:06d}_{scene_id}_{frame_path}_pred_id.png"
-                            )
+                            Image.fromarray(gt_raw, mode="I;16").save(export_dir / f"{base}_gt_id.png")
+                            Image.fromarray(pred_raw, mode="I;16").save(export_dir / f"{base}_pred_id.png")
                         seen_exports.add(sample_idx)
+                        exported += 1
                     sample_idx += 1
                 continue
 
@@ -225,6 +321,7 @@ def evaluate_checkpoint(
         "pixel_acc": pixel_acc,
         "num_samples": total_samples,
         "num_batches": n_batches,
+        "num_exports": exported,
     }
 
 
@@ -238,6 +335,7 @@ def main() -> None:
     ap.add_argument("--chunk-format", choices=["auto", "pt", "safetensors"], default="auto")
     ap.add_argument("--scenes-file", required=True)
     ap.add_argument("--scenes", help="Comma-separated scenes list (overridden by --scenes-file).")
+    ap.add_argument("--split-name", default="val", help="Label used in summary outputs (e.g. val/test).")
     ap.add_argument("--index-cache")
     ap.add_argument("--num-classes", type=int, default=200)
     ap.add_argument("--ignore-index", type=int, default=65535)
@@ -258,14 +356,20 @@ def main() -> None:
     ap.add_argument("--focal-gamma", type=float, default=2.0)
     ap.add_argument("--checkpoint-dir", required=True)
     ap.add_argument("--max-checkpoints", type=int, default=0, help="0 = no limit")
+    ap.add_argument("--sort-by", choices=["miou", "pixel_acc", "val_loss"], default="miou")
+    ap.add_argument("--sort-order", choices=["auto", "asc", "desc"], default="auto")
     ap.add_argument("--out-json", type=Path)
-    ap.add_argument("--export-masks", action="store_true", help="Export 4 GT/pred masks for visual inspection.")
+    ap.add_argument("--out-csv", type=Path)
+    ap.add_argument("--export-masks", action="store_true", help="Export qualitative samples from top checkpoints.")
     ap.add_argument(
         "--export-raw",
         action="store_true",
         help="Also export raw label-id masks (uint16 PNG) alongside colorized masks.",
     )
     ap.add_argument("--export-dir", type=Path, default=Path("eval_masks"))
+    ap.add_argument("--export-top-k", type=int, default=1, help="How many top-ranked checkpoints to export.")
+    ap.add_argument("--export-samples", type=int, default=4, help="How many samples per exported checkpoint.")
+    ap.add_argument("--overlay-alpha", type=float, default=0.45)
     args = ap.parse_args()
 
     module = _load_train_module()
@@ -348,20 +452,12 @@ def main() -> None:
     if not checkpoints:
         raise RuntimeError(f"No checkpoints found in {ckpt_dir}")
 
-    export_indices = []
-    if args.export_masks:
-        n = len(ds)
-        export_indices = sorted(set([0, n // 2, (3 * n) // 4, n - 1]))
-        export_indices = [i for i in export_indices if 0 <= i < n]
-        print(f"[info] exporting masks for indices: {export_indices}")
-
-    results = []
+    results: List[Dict] = []
     for idx, ckpt_path in enumerate(checkpoints):
         print(f"[info] evaluating {ckpt_path.name} ({idx + 1}/{len(checkpoints)})")
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        model.load_state_dict(ckpt["model_state"], strict=True)
-
-        export_dir = args.export_dir / ckpt_path.stem
+        payload = torch.load(ckpt_path, map_location="cpu")
+        model_state = _extract_model_state(payload)
+        model.load_state_dict(model_state, strict=True)
         metrics = evaluate_checkpoint(
             module=module,
             model=model,
@@ -371,23 +467,96 @@ def main() -> None:
             ignore_index=args.ignore_index,
             focal_alpha=args.focal_alpha,
             focal_gamma=args.focal_gamma,
-            export_masks=args.export_masks,
-            export_raw=args.export_raw,
-            export_indices=export_indices,
-            export_dir=export_dir,
+            export_masks=False,
+            export_raw=False,
+            export_indices=[],
+            export_dir=args.export_dir,
+            dataset_root=dataset_root,
+            overlay_alpha=args.overlay_alpha,
         )
-        metrics["checkpoint"] = str(ckpt_path)
-        results.append(metrics)
+        epoch, step = _parse_epoch_step_from_name(ckpt_path.name)
+        row = {
+            "checkpoint": str(ckpt_path),
+            "checkpoint_name": ckpt_path.name,
+            "epoch": epoch,
+            "step": step,
+            **metrics,
+        }
+        results.append(row)
         print(
             f"[result] loss={metrics['val_loss']:.4f} "
             f"mIoU={metrics['miou']:.4f} "
             f"pix_acc={metrics['pixel_acc']:.4f}"
         )
 
+    if args.sort_order == "auto":
+        reverse = args.sort_by != "val_loss"
+    else:
+        reverse = args.sort_order == "desc"
+    ranked = sorted(results, key=lambda x: float(x[args.sort_by]), reverse=reverse)
+    for rank, row in enumerate(ranked, start=1):
+        row["rank"] = rank
+
+    print(
+        f"[summary] split={args.split_name} samples={len(ds)} "
+        f"checkpoints={len(ranked)} sort={args.sort_by} ({'desc' if reverse else 'asc'})"
+    )
+    for row in ranked[: min(10, len(ranked))]:
+        print(
+            f"[rank {row['rank']:>2}] "
+            f"ep={row['epoch']:>4} step={row['step']:>8} "
+            f"loss={row['val_loss']:.4f} miou={row['miou']:.4f} pix={row['pixel_acc']:.4f} "
+            f"{row['checkpoint_name']}"
+        )
+
+    if args.out_csv:
+        _write_csv(args.out_csv, ranked)
+        print(f"[info] wrote {args.out_csv}")
+
     if args.out_json:
-        payload = {"results": results}
+        payload = {
+            "split": args.split_name,
+            "dataset_root": str(dataset_root),
+            "scenes_file": str(Path(args.scenes_file).expanduser()),
+            "num_scenes": len(scenes) if scenes is not None else None,
+            "num_samples": len(ds),
+            "num_checkpoints": len(ranked),
+            "sort_by": args.sort_by,
+            "sort_order": "desc" if reverse else "asc",
+            "results": ranked,
+        }
+        args.out_json.parent.mkdir(parents=True, exist_ok=True)
         args.out_json.write_text(json.dumps(payload, indent=2))
         print(f"[info] wrote {args.out_json}")
+
+    if args.export_masks and args.export_top_k > 0:
+        export_indices = _build_export_indices(len(ds), args.export_samples)
+        print(f"[info] export indices: {export_indices}")
+        export_count = min(int(args.export_top_k), len(ranked))
+        for row in ranked[:export_count]:
+            ckpt_path = Path(row["checkpoint"])
+            payload = torch.load(ckpt_path, map_location="cpu")
+            model_state = _extract_model_state(payload)
+            model.load_state_dict(model_state, strict=True)
+            export_dir = args.export_dir / f"rank_{int(row['rank']):02d}_{ckpt_path.stem}"
+            print(f"[info] exporting qualitative samples for rank {row['rank']} -> {export_dir}")
+            export_metrics = evaluate_checkpoint(
+                module=module,
+                model=model,
+                dl=dl,
+                device=device,
+                num_classes=args.num_classes,
+                ignore_index=args.ignore_index,
+                focal_alpha=args.focal_alpha,
+                focal_gamma=args.focal_gamma,
+                export_masks=True,
+                export_raw=args.export_raw,
+                export_indices=export_indices,
+                export_dir=export_dir,
+                dataset_root=dataset_root,
+                overlay_alpha=args.overlay_alpha,
+            )
+            print(f"[info] exported {int(export_metrics.get('num_exports', 0))} samples for {ckpt_path.name}")
 
 
 if __name__ == "__main__":
