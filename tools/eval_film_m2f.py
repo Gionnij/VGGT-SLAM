@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import random
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -111,6 +112,101 @@ def _select_checkpoints(checkpoints: Sequence[Path], mode: str) -> List[Path]:
     # Keep unparseable names at the end.
     selected.extend(unknown)
     return selected
+
+
+def _subset_scenes(
+    scenes: Optional[Sequence[str]],
+    *,
+    scene_offset: int,
+    scene_stride: int,
+    max_scenes: int,
+) -> Optional[List[str]]:
+    if scenes is None:
+        return None
+    if scene_stride <= 0:
+        raise ValueError("scene_stride must be >= 1")
+    offset = max(0, int(scene_offset))
+    vals = list(scenes)
+    vals = vals[offset::scene_stride]
+    if max_scenes > 0:
+        vals = vals[: int(max_scenes)]
+    return vals
+
+
+def _uniform_pick_indices(n: int, k: int) -> List[int]:
+    if k <= 0 or n <= 0:
+        return []
+    if k >= n:
+        return list(range(n))
+    if k == 1:
+        return [0]
+    out = set()
+    span = n - 1
+    for i in range(k):
+        out.add(int(round(i * span / (k - 1))))
+    return sorted(out)
+
+
+def _subsample_samples(
+    samples: Sequence[Dict],
+    *,
+    sample_step: int,
+    max_samples_per_scene: int,
+    max_samples: int,
+    sample_mode: str,
+    seed: int,
+) -> List[Dict]:
+    if sample_step <= 0:
+        raise ValueError("sample_step must be >= 1")
+    out = list(samples)[::sample_step]
+
+    if max_samples_per_scene > 0:
+        per_scene_count: Dict[str, int] = {}
+        kept: List[Dict] = []
+        for s in out:
+            sid = str(s.get("scene_id", ""))
+            c = per_scene_count.get(sid, 0)
+            if c >= max_samples_per_scene:
+                continue
+            per_scene_count[sid] = c + 1
+            kept.append(s)
+        out = kept
+
+    if max_samples > 0 and len(out) > max_samples:
+        k = int(max_samples)
+        mode = str(sample_mode).strip().lower()
+        if mode == "head":
+            out = out[:k]
+        elif mode == "uniform":
+            idxs = _uniform_pick_indices(len(out), k)
+            out = [out[i] for i in idxs]
+        elif mode == "random":
+            rng = random.Random(int(seed))
+            idxs = list(range(len(out)))
+            rng.shuffle(idxs)
+            idxs = sorted(idxs[:k])
+            out = [out[i] for i in idxs]
+        else:
+            raise ValueError(f"Unknown sample_mode: {sample_mode}")
+    return out
+
+
+def _filter_checkpoints_by_epoch(
+    checkpoints: Sequence[Path],
+    *,
+    epoch_min: int,
+    epoch_max: int,
+) -> List[Path]:
+    out: List[Path] = []
+    for ckpt in checkpoints:
+        ep, _step = _parse_epoch_step_from_name(ckpt.name)
+        if ep >= 0:
+            if epoch_min > 0 and ep < epoch_min:
+                continue
+            if epoch_max > 0 and ep > epoch_max:
+                continue
+        out.append(ckpt)
+    return out
 
 
 def _extract_model_state(payload: Dict) -> Dict[str, torch.Tensor]:
@@ -359,6 +455,9 @@ def main() -> None:
     ap.add_argument("--chunk-format", choices=["auto", "pt", "safetensors"], default="auto")
     ap.add_argument("--scenes-file", required=True)
     ap.add_argument("--scenes", help="Comma-separated scenes list (overridden by --scenes-file).")
+    ap.add_argument("--scene-offset", type=int, default=0, help="Skip first N scenes from the selected scene list.")
+    ap.add_argument("--scene-stride", type=int, default=1, help="Take every N-th scene from the selected scene list.")
+    ap.add_argument("--max-scenes", type=int, default=0, help="0 = all selected scenes.")
     ap.add_argument("--split-name", default="val", help="Label used in summary outputs (e.g. val/test).")
     ap.add_argument("--index-cache")
     ap.add_argument("--num-classes", type=int, default=200)
@@ -385,7 +484,21 @@ def main() -> None:
         default="all",
         help="all: evaluate every .pt file. epoch-end: keep latest step per epoch only.",
     )
+    ap.add_argument("--epoch-min", type=int, default=0, help="0 = no lower bound.")
+    ap.add_argument("--epoch-max", type=int, default=0, help="0 = no upper bound.")
+    ap.add_argument("--checkpoint-stride", type=int, default=1, help="Evaluate every N-th selected checkpoint.")
     ap.add_argument("--max-checkpoints", type=int, default=0, help="0 = no limit")
+    ap.add_argument("--max-chunks", type=int, default=0, help="0 = all chunks.")
+    ap.add_argument("--sample-step", type=int, default=1, help="Keep every N-th sample from indexed samples.")
+    ap.add_argument("--max-samples-per-scene", type=int, default=0, help="0 = no per-scene cap.")
+    ap.add_argument("--max-samples", type=int, default=0, help="0 = no total sample cap.")
+    ap.add_argument(
+        "--sample-mode",
+        choices=["head", "uniform", "random"],
+        default="head",
+        help="How to select when --max-samples is used.",
+    )
+    ap.add_argument("--seed", type=int, default=42, help="Seed used when --sample-mode=random.")
     ap.add_argument("--sort-by", choices=["miou", "pixel_acc", "val_loss"], default="miou")
     ap.add_argument("--sort-order", choices=["auto", "asc", "desc"], default="auto")
     ap.add_argument("--out-json", type=Path)
@@ -409,7 +522,14 @@ def main() -> None:
     if scenes_from_file and args.scenes:
         print("[info] scenes-file provided; overriding --scenes.")
     scenes_cli = [s.strip() for s in args.scenes.split(",")] if args.scenes else None
-    scenes = scenes_from_file or scenes_cli
+    scenes = _subset_scenes(
+        scenes_from_file or scenes_cli,
+        scene_offset=args.scene_offset,
+        scene_stride=args.scene_stride,
+        max_scenes=args.max_scenes,
+    )
+    if scenes is not None:
+        print(f"[info] selected scenes: {len(scenes)}")
 
     ignore_classes = _parse_ignore_classes(args.ignore_classes)
     ignore_from_file = _load_list_from_file(args.ignore_classes_file)
@@ -433,6 +553,9 @@ def main() -> None:
     chunk_files = module.list_chunk_files(
         dataset_root, scenes=scenes, chunk_format=args.chunk_format
     )
+    if args.max_chunks and args.max_chunks > 0:
+        chunk_files = chunk_files[: int(args.max_chunks)]
+    print(f"[info] selected chunks: {len(chunk_files)}")
     samples = module.build_or_load_index(
         chunk_files=chunk_files,
         labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
@@ -442,6 +565,16 @@ def main() -> None:
         label_chunk_ext=args.label_chunk_ext,
         use_label_chunks=args.use_label_chunks,
     )
+    n_samples_before = len(samples)
+    samples = _subsample_samples(
+        samples,
+        sample_step=args.sample_step,
+        max_samples_per_scene=args.max_samples_per_scene,
+        max_samples=args.max_samples,
+        sample_mode=args.sample_mode,
+        seed=args.seed,
+    )
+    print(f"[info] selected samples: {len(samples)} (from {n_samples_before})")
 
     ds = module.ChunkDataset(
         samples,
@@ -480,6 +613,13 @@ def main() -> None:
     if not all_checkpoints:
         raise RuntimeError(f"No checkpoints found in {ckpt_dir}")
     checkpoints = _select_checkpoints(all_checkpoints, args.checkpoint_select)
+    checkpoints = _filter_checkpoints_by_epoch(
+        checkpoints,
+        epoch_min=args.epoch_min,
+        epoch_max=args.epoch_max,
+    )
+    if args.checkpoint_stride and args.checkpoint_stride > 1:
+        checkpoints = checkpoints[:: int(args.checkpoint_stride)]
     print(
         f"[info] checkpoints found={len(all_checkpoints)} "
         f"selected={len(checkpoints)} mode={args.checkpoint_select}"
