@@ -514,6 +514,8 @@ _run_vggt_live_mode () {
   local WINDOW_SIZE="${VGGT_WINDOW_SIZE:-15}"
   local OVERLAP_SIZE="${VGGT_OVERLAP_SIZE:-1}"
   local TARGET_FPS="${VGGT_TARGET_FPS:-2.0}"
+  local VIS_MAP="${VGGT_VIS_MAP:-0}"
+  local VISER_PORT="${VGGT_VISER_PORT:-8080}"
   local MODEL_AUTOCAST="${VGGT_MODEL_AUTOCAST:-auto}"
   local LIVE_TEMP_IMAGE_FORMAT="${VGGT_LIVE_TEMP_IMAGE_FORMAT:-jpg}"
   local LIVE_TEMP_JPEG_QUALITY="${VGGT_LIVE_TEMP_JPEG_QUALITY:-90}"
@@ -525,6 +527,8 @@ _run_vggt_live_mode () {
   local SEM_INJECT_CHUNK_FORMAT="${VGGT_SEM_INJECT_CHUNK_FORMAT:-auto}"
   local SEM_INJECT_START_INDEX="${VGGT_SEM_INJECT_START_INDEX:-0}"
   local SEM_INJECT_CHUNK_INDEX="${VGGT_SEM_INJECT_CHUNK_INDEX:-}"
+  local RUNTIME_METRICS="${VGGT_RUNTIME_METRICS:-0}"
+  local RUNTIME_METRICS_PATH="${VGGT_RUNTIME_METRICS_PATH:-}"
   local ENABLE_PIPELINE_CHECK="${VGGT_PIPELINE_CHECK:-${default_pipeline_check}}"
 
   case "${INPUT_MODE}" in
@@ -642,6 +646,8 @@ EOF
 	    export VGGT_INPUT_MODE="'"${INPUT_MODE}"'"
 	    export VGGT_OFFLINE_IMAGE_FOLDER="'"${OFFLINE_IMAGE_FOLDER}"'"
 	    export VGGT_OFFLINE_USE_FLOW_FILTER="'"${OFFLINE_USE_FLOW_FILTER}"'"
+	    export VGGT_RUNTIME_METRICS="'"${RUNTIME_METRICS}"'"
+	    [ -n "'"${RUNTIME_METRICS_PATH}"'" ] && export VGGT_RUNTIME_METRICS_PATH="'"${RUNTIME_METRICS_PATH}"'"
 	    export VGGT_SEM_INJECT_CHUNK_DIR="'"${SEM_INJECT_CHUNK_DIR}"'"
 	    export VGGT_SEM_INJECT_CHUNK_FORMAT="'"${SEM_INJECT_CHUNK_FORMAT}"'"
 	    export VGGT_SEM_INJECT_START_INDEX="'"${SEM_INJECT_START_INDEX}"'"
@@ -665,6 +671,7 @@ EOF
 	    export VGGT_M2F_WEIGHTS="'"${M2F_WEIGHTS}"'"
 	    export VGGT_MAX_LIVE_STEPS="'"${MAX_LIVE_STEPS}"'"
 	    export VGGT_MAX_LOOPS="'"${MAX_LOOPS}"'"
+	    export VGGT_VISER_PORT="'"${VISER_PORT}"'"
 	    export VGGT_MODEL_AUTOCAST="'"${MODEL_AUTOCAST}"'"
 	    [ -n "${VGGT_FINETUNE_CKPT:-}" ] && echo "[run_'"${mode}"'] Fine-tune checkpoint: ${VGGT_FINETUNE_CKPT}"
 	    [ -n "${VGGT_M2F_WEIGHTS:-}" ] && echo "[run_'"${mode}"'] Semantic weights: ${VGGT_M2F_WEIGHTS}"
@@ -678,6 +685,7 @@ EOF
 	    echo "[run_'"${mode}"'] sem_dino_scale=${VGGT_SEM_DINO_SCALE}"
 	    echo "[run_'"${mode}"'] sem_target_hw=${VGGT_SEM_TARGET_HW}"
 	    echo "[run_'"${mode}"'] sem_export=${VGGT_SEM_EXPORT_EMBEDDINGS} every=${VGGT_SEM_EXPORT_EVERY} fmt=${VGGT_SEM_EXPORT_FORMAT}"
+	    echo "[run_'"${mode}"'] runtime_metrics=${VGGT_RUNTIME_METRICS} path=${VGGT_RUNTIME_METRICS_PATH:-<default>}"
 	    [ -n "${VGGT_FUSION_SCRIPT:-}" ] && echo "[run_'"${mode}"'] fusion_script=${VGGT_FUSION_SCRIPT}"
 	    [ -n "${VGGT_DINO_PROJ_WEIGHTS:-}" ] && echo "[run_'"${mode}"'] dino_proj=${VGGT_DINO_PROJ_WEIGHTS}"
 	    [ -n "${VGGT_DINO_ALIGN_PHASE:-}" ] && echo "[run_'"${mode}"'] dino_align_phase=${VGGT_DINO_ALIGN_PHASE}"
@@ -691,6 +699,7 @@ EOF
 	      echo "[run_'"${mode}"'] sem_inject_dir=${VGGT_SEM_INJECT_CHUNK_DIR} fmt=${VGGT_SEM_INJECT_CHUNK_FORMAT} start=${VGGT_SEM_INJECT_START_INDEX} fixed=${VGGT_SEM_INJECT_CHUNK_INDEX:-<auto>}"
 	    fi
 	    echo "[run_'"${mode}"'] model_autocast=${VGGT_MODEL_AUTOCAST}"
+	    echo "[run_'"${mode}"'] vis_map='"${VIS_MAP}"' viser_port=${VGGT_VISER_PORT}"
 	    echo "[run_'"${mode}"'] window='"${WINDOW_SIZE}"' overlap='"${OVERLAP_SIZE}"' target_fps='"${TARGET_FPS}"'"
 	    echo "[run_'"${mode}"'] max_loops=${VGGT_MAX_LOOPS}"
 	    EXTRA_ARGS=""
@@ -699,6 +708,9 @@ EOF
 	    fi
 	    if [ "${VGGT_LOAD_BACKBONE_CKPT}" = "1" ] && [ -n "${VGGT_FINETUNE_CKPT}" ]; then
 	      EXTRA_ARGS="${EXTRA_ARGS} --finetune-checkpoint ${VGGT_FINETUNE_CKPT}"
+	    fi
+	    if [ "'"${VIS_MAP}"'" = "1" ]; then
+	      EXTRA_ARGS="${EXTRA_ARGS} --vis_map"
 	    fi
 
 		    if [ -n "${VGGT_PIPELINE_PYTHON:-}" ] && [ -x "${VGGT_PIPELINE_PYTHON}" ]; then
