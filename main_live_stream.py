@@ -73,6 +73,7 @@ _bootstrap_gtsam_from_sitepkg()
 
 import vggt_slam.slam_utils as utils
 from vggt_slam.solver import Solver
+from vggt_slam.runtime_metrics import get_runtime_logger
 from hiding_folder.vggt import VGGT
 from taps_runtime import attach_vggt_taps
 from trace_sink import TraceSink
@@ -501,6 +502,7 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
     window = deque(maxlen=args.window_size + args.overlapping_window_size)
     last_proc_wall = time.time() - 10.0
     decimate = max(1, args.decimate_floor)
+    runtime_logger = get_runtime_logger()
 
     print(f"[LIVE] Using temp dir: {tmp_dir}")
     print(f"[LIVE] Window={args.window_size} Overlap={args.overlapping_window_size} TargetFPS={args.target_fps}")
@@ -516,6 +518,14 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
         print(
             "[LIVE] Temp frame encoding: jpg "
             f"(quality={max(1, min(100, int(os.getenv('VGGT_LIVE_TEMP_JPEG_QUALITY', '90'))))})"
+        )
+    if runtime_logger is not None:
+        runtime_logger.log(
+            "live_start",
+            window_size=int(args.window_size),
+            overlap=int(args.overlapping_window_size),
+            target_fps=float(args.target_fps),
+            max_loops=int(args.max_loops),
         )
 
     try:
@@ -546,6 +556,14 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                 continue
 
             window.append(frame)
+            if runtime_logger is not None:
+                runtime_logger.log(
+                    "input_frame",
+                    seq=int(frame.seq),
+                    frame_ts=float(frame.ts),
+                    queue_len=int(qlen),
+                    decimate=int(decimate),
+                )
 
             # Pace by target FPS
             now = time.time()
@@ -577,6 +595,7 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
 
             # Run solver with current window; fail-soft on bad geometry windows.
             try:
+                geometry_t0 = time.perf_counter()
                 predictions = solver.run_predictions(
                     img_paths,
                     model,
@@ -589,10 +608,22 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                     demo.export_batch(list(window), frame_ids_window, predictions)
 
                 solver.add_points(predictions)
+                geometry_window_s = float(time.perf_counter() - geometry_t0)
+
+                graph_t0 = time.perf_counter()
                 solver.graph.optimize()
                 solver.map.update_submap_homographies(solver.graph)
+                graph_optimization_s = float(time.perf_counter() - graph_t0)
+                window_total_s = geometry_window_s + graph_optimization_s
             except Exception as exc:
                 print(f"[LIVE][WARN] Window processing failed at step={step_id}: {exc}")
+                if runtime_logger is not None:
+                    runtime_logger.log(
+                        "window_failed",
+                        step_id=int(step_id),
+                        error=str(exc),
+                        window_len=int(len(frame_ids_window)),
+                    )
                 if str(os.getenv("VGGT_LIVE_TRACEBACK", "0")).strip().lower() in ("1", "true", "yes", "on"):
                     traceback.print_exc()
                 # Best-effort cleanup so failed windows do not leave large tensors
@@ -625,6 +656,25 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
                     break
                 continue
 
+            if runtime_logger is not None:
+                processed_frames = max(1, int(len(frame_ids_window) - args.overlapping_window_size))
+                runtime_logger.log(
+                    "window_processed",
+                    step_id=int(step_id),
+                    window_len=int(len(frame_ids_window)),
+                    processed_frames=int(processed_frames),
+                    queue_len=int(qlen),
+                    geometry_window_s=float(geometry_window_s),
+                    graph_optimization_s=float(graph_optimization_s),
+                    window_total_s=float(window_total_s),
+                    semantic_inference_s=(
+                        float(predictions["_runtime_semantic_s"])
+                        if predictions.get("_runtime_semantic_s") is not None
+                        else None
+                    ),
+                    loop_closures=int(len(predictions.get("detected_loops", []))),
+                )
+
             loop_closure_detected = len(predictions.get("detected_loops", [])) > 0
             if args.vis_map:
                 if loop_closure_detected:
@@ -652,6 +702,12 @@ def live_loop(args, solver: Solver, model: VGGT, device: str, trace_sink: Option
         print("[LIVE] Interrupted by user. Shutting down…")
     finally:
         ros.shutdown()
+        if runtime_logger is not None:
+            runtime_logger.log(
+                "live_stop",
+                submaps=int(solver.map.get_num_submaps()),
+                loops=int(solver.graph.get_num_loops()),
+            )
         if not args.vis_map:
             solver.update_all_submap_vis()
 

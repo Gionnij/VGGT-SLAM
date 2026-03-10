@@ -7,9 +7,10 @@ import open3d as o3d
 import viser
 import viser.transforms as viser_tf
 import os
+import time
 import traceback
 from termcolor import colored
-from typing import Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from vggt.utils.geometry import closed_form_inverse_se3, unproject_depth_map_to_point_map
 from vggt.utils.load_fn import load_and_preprocess_images
@@ -21,6 +22,7 @@ from vggt_slam.map import GraphMap
 from vggt_slam.submap import Submap
 from vggt_slam.h_solve import ransac_projective
 from vggt_slam.gradio_viewer import TrimeshViewer
+from vggt_slam.runtime_metrics import get_runtime_logger
 from pipeline_check import get_pipeline_logger
 
 _SEM_RUNNER_LOGGED = False
@@ -28,6 +30,11 @@ _SEM_ERROR_COUNT = 0
 _SEM_LOG_COUNTER = 0
 _FILM_DELTA_COUNTER = 0
 _PRED_AUTOCAST_LOGGED = False
+
+
+def _maybe_cuda_sync(device: torch.device) -> None:
+    if isinstance(device, torch.device) and device.type == "cuda":
+        torch.cuda.synchronize()
 
 
 def _gtsam_sym(name):
@@ -173,11 +180,15 @@ class Solver:
         self.init_conf_threshold = init_conf_threshold
         self.use_point_map = use_point_map
         self.gradio_mode = gradio_mode
+        try:
+            vis_port = int(str(os.getenv("VGGT_VISER_PORT", "8080")).strip())
+        except ValueError:
+            vis_port = 8080
 
         if self.gradio_mode:
             self.viewer = TrimeshViewer()
         else:
-            self.viewer = Viewer()
+            self.viewer = Viewer(port=vis_port)
 
         self.flow_tracker = FrameTracker()
         self.map = GraphMap()
@@ -566,6 +577,15 @@ class Solver:
 
         # Optional semantic head sidecar (no effect if module/env absent)
         global _SEM_RUNNER_LOGGED, _SEM_ERROR_COUNT, _SEM_LOG_COUNTER, _FILM_DELTA_COUNTER
+        runtime_logger = get_runtime_logger()
+        semantic_elapsed_s = None
+        semantic_ok = True
+        semantic_error = ""
+        sem_device = next(model.parameters()).device
+        sem_t0 = None
+        if runtime_logger is not None:
+            _maybe_cuda_sync(sem_device)
+            sem_t0 = time.perf_counter()
         try:
             runner_source = "hiding_folder.semantic_runner"
             try:
@@ -580,12 +600,11 @@ class Solver:
                     f"dpt_source={os.getenv('VGGT_SEM_DPT_SOURCE', 'raw')}"
                 )
                 _SEM_RUNNER_LOGGED = True
-            device = next(model.parameters()).device
             predictions["_sem_step_id"] = int(step_id)
             predictions["_sem_frame_ids"] = list(frame_ids_window) if frame_ids_window is not None else []
             if sem_target_hw is not None:
                 predictions["_sem_target_hw"] = (int(sem_target_hw[0]), int(sem_target_hw[1]))
-            run_semantic_if_enabled(model, predictions, device)
+            run_semantic_if_enabled(model, predictions, sem_device)
             sem_masks = predictions.get("sem_mask_logits")
             sem_cls = predictions.get("sem_cls_logits")
             if sem_masks is not None and sem_cls is not None:
@@ -636,11 +655,27 @@ class Solver:
                         status="warn",
                     )
         except Exception as exc:
+            semantic_ok = False
+            semantic_error = str(exc)
             _SEM_ERROR_COUNT += 1
             if _SEM_ERROR_COUNT <= 5 or (_SEM_ERROR_COUNT % 50) == 0:
                 print(f"[SEM runner][WARN] failed ({_SEM_ERROR_COUNT}): {exc}")
                 if str(os.getenv("VGGT_SEM_TRACEBACK", "0")).strip().lower() in ("1", "true", "yes", "on"):
                     traceback.print_exc()
+        finally:
+            if runtime_logger is not None and sem_t0 is not None:
+                _maybe_cuda_sync(sem_device)
+                semantic_elapsed_s = float(time.perf_counter() - sem_t0)
+                runtime_logger.log(
+                    "semantic_inference",
+                    step_id=int(step_id) if step_id is not None else -1,
+                    elapsed_s=semantic_elapsed_s,
+                    success=bool(semantic_ok),
+                    error=semantic_error,
+                    backend=str(os.getenv("VGGT_SEM_BACKEND", "")),
+                    frame_count=int(len(frame_ids_window)) if frame_ids_window is not None else int(images.shape[0]),
+                )
+        predictions["_runtime_semantic_s"] = semantic_elapsed_s
 
         # TODO: remove FiLM delta probe after validation.
         dh = getattr(model, "depth_head", None)
