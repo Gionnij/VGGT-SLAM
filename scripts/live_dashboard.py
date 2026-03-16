@@ -522,7 +522,7 @@ def latest_image(path: Path):
 
 def capture_recent_tmux(session_name: str, window_name: str, lines: int):
     proc = subprocess.run(
-        ["tmux", "capture-pane", "-p", "-t", f"{session_name}:{window_name}", "-S", f"-{max(1, lines)}"],
+        ["tmux", "capture-pane", "-p", "-t", session_name + ":" + window_name, "-S", "-" + str(max(1, lines))],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
