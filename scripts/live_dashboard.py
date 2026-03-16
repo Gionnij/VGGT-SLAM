@@ -859,7 +859,8 @@ def start_pipeline(
         f"--session {_quote(session.strip())} "
         "--checkpoint \"$VGGT_FINETUNE_CKPT\" "
         "--demo-root \"$VGGT_DEMO_ROOT\" "
-        "--log-results \"$VGGT_LOG_RESULTS\""
+        "--log-results \"$VGGT_LOG_RESULTS\" "
+        "--max-live-steps \"${VGGT_MAX_LIVE_STEPS:-0}\""
     )
     script = "; ".join(script_lines)
 
@@ -1153,6 +1154,10 @@ def parse_args() -> argparse.Namespace:
         "VGGT_DASHBOARD_BASHRC_SHARED",
         f"{default_remote_root}/shell/bashrc_shared" if default_mode == "ssh" else local_default_bashrc,
     )
+    default_setup_script = os.getenv(
+        "VGGT_DASHBOARD_SETUP_SCRIPT",
+        f"{default_remote_root}/shell/dashboard_env.sh" if default_mode == "ssh" else str((repo_root / "shell" / "dashboard_env.sh").resolve()),
+    )
     default_demo = os.getenv(
         "VGGT_DEMO_ROOT",
         f"{default_remote_root}/demo" if default_mode == "ssh" else local_default_demo,
@@ -1173,7 +1178,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-viewer-port", type=int, default=int(os.getenv("VGGT_LOCAL_VISER_PORT", "18080")))
 
     parser.add_argument("--bashrc-shared", default=default_bashrc, help="Path to bashrc_shared")
-    parser.add_argument("--setup-script", default=os.getenv("VGGT_DASHBOARD_SETUP_SCRIPT", ""), help="Optional setup script")
+    parser.add_argument("--setup-script", default=default_setup_script, help="Optional setup script")
     parser.add_argument("--session", default=os.getenv("VGGT_DASHBOARD_SESSION", "robot_pipeline"), help="tmux session")
     parser.add_argument("--checkpoint", default=os.getenv("VGGT_FINETUNE_CKPT", ""), help="Checkpoint path")
     parser.add_argument("--demo-root", default=default_demo, help="Demo root")
