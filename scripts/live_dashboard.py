@@ -639,29 +639,33 @@ def start_pipeline(
     setup_script = setup_script.strip()
     viewer_port_i = int(viewer_port)
     log_results_i = 1 if log_results else 0
+    base_exports = [
+        f"export VGGT_FINETUNE_CKPT={_quote(checkpoint.strip())}",
+        f"export VGGT_DEMO_ROOT={_quote(demo_root.strip())}",
+        "export VGGT_LOG_RESULTS=" + _quote(str(log_results_i)),
+        f"export HPC_ROBOT_SAVE_DIR={_quote(raw_dir.strip())}",
+        "export HPC_ROBOT_SAVE_EVERY=1",
+        "export VGGT_VIS_MAP=1",
+        f"export VGGT_VISER_PORT={_quote(str(viewer_port_i))}",
+    ]
 
     script_lines = [
         "set -euo pipefail",
         f"source {_quote(bashrc_shared.strip())}",
     ]
+    script_lines.extend(base_exports)
     if setup_script:
         script_lines.append(f"source {_quote(setup_script)}")
-    script_lines.extend(
-        [
-            f"export VGGT_FINETUNE_CKPT={_quote(checkpoint.strip())}",
-            f"export VGGT_DEMO_ROOT={_quote(demo_root.strip())}",
-            f"export HPC_ROBOT_SAVE_DIR={_quote(raw_dir.strip())}",
-            "export HPC_ROBOT_SAVE_EVERY=1",
-            "export VGGT_VIS_MAP=1",
-            f"export VGGT_VISER_PORT={_quote(str(viewer_port_i))}",
-            (
-                "start_robot_pipeline_tmux -k --no-attach "
-                f"--session {_quote(session.strip())} "
-                f"--checkpoint {_quote(checkpoint.strip())} "
-                f"--demo-root {_quote(demo_root.strip())} "
-                f"--log-results {log_results_i}"
-            ),
-        ]
+    # Re-export UI-controlled values after sourcing the setup script so the
+    # script can derive dependent vars from the checkpoint while the UI keeps
+    # final control over the launch-critical paths.
+    script_lines.extend(base_exports)
+    script_lines.append(
+        "start_robot_pipeline_tmux -k --no-attach "
+        f"--session {_quote(session.strip())} "
+        "--checkpoint \"$VGGT_FINETUNE_CKPT\" "
+        "--demo-root \"$VGGT_DEMO_ROOT\" "
+        "--log-results \"$VGGT_LOG_RESULTS\""
     )
     script = "; ".join(script_lines)
 
