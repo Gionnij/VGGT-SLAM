@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pickle
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
@@ -86,11 +87,20 @@ class SemanticHead(nn.Module):
         cfg.MODEL.DEVICE = "cuda" if device.type == "cuda" else "cpu"
         cfg.freeze()
 
+        stride_mode = os.getenv("VGGT_SEM_STRIDE_MODE", "s8").strip().lower()
+        if stride_mode in ("s4", "4", "dense4"):
+            feature_strides = [4, 8, 16, 32]
+        elif stride_mode in ("s8", "8", "legacy", "default"):
+            feature_strides = [8, 16, 32, 64]
+        else:
+            print(f"[SEM][WARN] Unknown VGGT_SEM_STRIDE_MODE='{stride_mode}', falling back to s8.")
+            feature_strides = [8, 16, 32, 64]
+
         self._input_shapes: Dict[str, ShapeSpec] = {
-            "res2": ShapeSpec(channels=256, stride=8),
-            "res3": ShapeSpec(channels=512, stride=16),
-            "res4": ShapeSpec(channels=1024, stride=32),
-            "res5": ShapeSpec(channels=1024, stride=64),
+            "res2": ShapeSpec(channels=256, stride=feature_strides[0]),
+            "res3": ShapeSpec(channels=512, stride=feature_strides[1]),
+            "res4": ShapeSpec(channels=1024, stride=feature_strides[2]),
+            "res5": ShapeSpec(channels=1024, stride=feature_strides[3]),
         }
         self.device = device
         self.head = build_sem_seg_head(cfg, self._input_shapes).to(device)
@@ -98,7 +108,8 @@ class SemanticHead(nn.Module):
         if weights_path:
             self._load_head_weights(weights_path)
 
-        self.scales = [8, 16, 32, 64]
+        self.scales = feature_strides
+        print(f"[SEM] feature strides (res2..res5): {self.scales} [mode={stride_mode}]")
 
     def _load_head_weights(self, weights_path: str) -> None:
         path = Path(weights_path).expanduser()
