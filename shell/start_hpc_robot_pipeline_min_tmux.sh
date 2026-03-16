@@ -24,6 +24,8 @@ LOG_RESULTS="${VGGT_LOG_RESULTS:-0}"
 MAX_LIVE_STEPS="${VGGT_MAX_LIVE_STEPS:-0}"
 STOP_TOPIC="${VGGT_STOP_TOPIC:-/stream/stop}"
 STATS_INTERVAL="${HPC_ROBOT_STATS_INTERVAL:-5}"
+SAVE_EVERY="${HPC_ROBOT_SAVE_EVERY:-0}"
+SAVE_DIR="${HPC_ROBOT_SAVE_DIR:-$HOME/src/VGGT-SLAM/robot_probe_frames}"
 
 # Forward these runtime overrides explicitly into the allocated GPU shell.
 # Some schedulers/cluster wrappers do not preserve the full parent env.
@@ -83,6 +85,8 @@ FWD_VGGT_SEM_INJECT_CHUNK_DIR="${VGGT_SEM_INJECT_CHUNK_DIR:-}"
 FWD_VGGT_SEM_INJECT_CHUNK_FORMAT="${VGGT_SEM_INJECT_CHUNK_FORMAT:-}"
 FWD_VGGT_SEM_INJECT_START_INDEX="${VGGT_SEM_INJECT_START_INDEX:-}"
 FWD_VGGT_SEM_INJECT_CHUNK_INDEX="${VGGT_SEM_INJECT_CHUNK_INDEX:-}"
+FWD_HPC_ROBOT_SAVE_EVERY="${HPC_ROBOT_SAVE_EVERY:-}"
+FWD_HPC_ROBOT_SAVE_DIR="${HPC_ROBOT_SAVE_DIR:-}"
 FWD_HPC_ROBOT_MAX_WIDTH="${HPC_ROBOT_MAX_WIDTH:-}"
 FWD_HPC_ROBOT_MAX_HEIGHT="${HPC_ROBOT_MAX_HEIGHT:-}"
 
@@ -104,6 +108,8 @@ check_forwarded_env_coverage() {
   forwarded_names["VGGT_MAX_LIVE_STEPS"]=1
   forwarded_names["VGGT_STOP_TOPIC"]=1
   forwarded_names["HPC_ROBOT_STATS_INTERVAL"]=1
+  forwarded_names["HPC_ROBOT_SAVE_EVERY"]=1
+  forwarded_names["HPC_ROBOT_SAVE_DIR"]=1
 
   # Internal vars not meant to be forwarded to GPU runtime.
   declare -A ignored_names=()
@@ -242,6 +248,8 @@ echo "[head-bridge] waiting for GPU state then starting bridge on head..."
 export VGGT_GPU_STATE_FILE="${STATE_FILE}"
 export HPC_GPU_RUN_ID="${RUN_ID}"
 export HPC_ROBOT_STATS_INTERVAL="${STATS_INTERVAL}"
+export HPC_ROBOT_SAVE_EVERY="${SAVE_EVERY}"
+export HPC_ROBOT_SAVE_DIR="${SAVE_DIR}"
 export HPC_ROBOT_MAX_WIDTH="${FWD_HPC_ROBOT_MAX_WIDTH}"
 export HPC_ROBOT_MAX_HEIGHT="${FWD_HPC_ROBOT_MAX_HEIGHT}"
 hpc_head_bridge "${HEAD_PORT}" "${FPS}"
