@@ -6,8 +6,10 @@ import atexit
 import html
 import json
 import os
+import re
 import shlex
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,18 @@ POLL_SEC = 1.0
 
 _TUNNEL_PROC: Optional[subprocess.Popen[bytes]] = None
 _TUNNEL_SIG: Optional[tuple[str, str, str, str, int, int]] = None
+
+
+def _prune_incompatible_user_site_paths() -> None:
+    cur_mm = f"{sys.version_info.major}.{sys.version_info.minor}"
+    keep: list[str] = []
+    pat = re.compile(r"/Library/Python/(\d+\.\d+)/lib/python/site-packages/?$")
+    for path in sys.path:
+        m = pat.search(path)
+        if m is not None and m.group(1) != cur_mm:
+            continue
+        keep.append(path)
+    sys.path[:] = keep
 
 
 @dataclass
@@ -617,9 +631,9 @@ def start_pipeline(
     ssh_key: str,
     ssh_options: str,
 ) -> tuple[str, str]:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
     mode = execution_mode.strip().lower()
     if not checkpoint.strip():
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
         return f"[{now}] start aborted", "checkpoint is required"
 
     setup_script = setup_script.strip()
@@ -654,45 +668,50 @@ def start_pipeline(
     if mode == "ssh":
         cfg = SshConfig(host=ssh_host.strip(), user=ssh_user.strip(), key_path=ssh_key.strip(), options=ssh_options.strip())
         if not cfg.host:
-            now = time.strftime("%Y-%m-%d %H:%M:%S")
             return f"[{now}] start aborted", "ssh host is required for execution_mode=ssh"
         _stop_tunnel()
         try:
             rc, out, err = _run_ssh_bash(cfg, script, timeout_s=300, text=True)
         except subprocess.TimeoutExpired:
-            now = time.strftime("%Y-%m-%d %H:%M:%S")
             return f"[{now}] start timeout", "start command timed out over ssh"
-        probe = _remote_probe(cfg, session, demo_root, raw_dir, "")
-        status = str(probe.get("status", f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] status unavailable"))
         log_text = (
             f"mode=ssh target={cfg.target}\n"
             f"exit_code={rc}\n"
             f"stdout:\n{_tail(str(out))}\n"
             f"stderr:\n{_tail(str(err))}"
         )
+        if rc != 0:
+            return f"[{now}] start failed (exit {rc})", log_text
+        probe = _remote_probe(cfg, session, demo_root, raw_dir, "")
+        status = str(probe.get("status", f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] status unavailable"))
+        if "stopped (tmux session" in status:
+            status = f"[{now}] start finished but tmux session '{session}' was not created"
         return status, log_text
 
     bashrc_path = Path(bashrc_shared).expanduser()
     if not bashrc_path.is_file():
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
         return f"[{now}] start aborted", f"missing bashrc_shared at {bashrc_path}"
     if setup_script:
         setup_path = Path(setup_script).expanduser()
         if not setup_path.is_file():
-            now = time.strftime("%Y-%m-%d %H:%M:%S")
             return f"[{now}] start aborted", f"setup script not found: {setup_path}"
     script_local = script.replace(bashrc_shared.strip(), str(bashrc_path))
     try:
         rc, out, err = _run_local_bash(script_local, timeout_s=240, text=True)
     except subprocess.TimeoutExpired:
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
         return f"[{now}] start timeout", "start command timed out"
-    return _pipeline_status_text_local(session), (
+    log_text = (
         f"mode=local\n"
         f"exit_code={rc}\n"
         f"stdout:\n{_tail(str(out))}\n"
         f"stderr:\n{_tail(str(err))}"
     )
+    if rc != 0:
+        return f"[{now}] start failed (exit {rc})", log_text
+    status = _pipeline_status_text_local(session)
+    if "stopped (tmux session" in status:
+        status = f"[{now}] start finished but tmux session '{session}' was not created"
+    return status, log_text
 
 
 def stop_pipeline(
@@ -769,7 +788,18 @@ def build_app(
     ssh_options_default: str,
     local_viewer_port_default: int,
 ):
-    import gradio as gr
+    _prune_incompatible_user_site_paths()
+    try:
+        import gradio as gr
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to import gradio in the current Python environment.\n"
+            f"python={sys.executable} version={sys.version.split()[0]}\n"
+            "Recommended fix:\n"
+            "  PYTHONNOUSERSITE=1 python3 -m pip install -U gradio numpy opencv-python pillow\n"
+            "  PYTHONNOUSERSITE=1 python3 /Users/giovannichiementin/Desktop/Thesis/VGGT-SLAM/scripts/live_dashboard.py ...\n"
+            f"Original import error: {exc}"
+        ) from exc
 
     with gr.Blocks(title="VGGT Live Dashboard") as demo:
         gr.Markdown(
