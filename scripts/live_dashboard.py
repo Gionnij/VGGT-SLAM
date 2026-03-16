@@ -210,10 +210,17 @@ atexit.register(_stop_tunnel)
 def _viewer_html(url: str) -> str:
     safe_url = html.escape(url, quote=True)
     return (
-        "<div style='height:460px; border:1px solid #d0d7de; border-radius:8px; overflow:hidden;'>"
-        f"<iframe src='{safe_url}' style='width:100%; height:100%; border:0;'></iframe>"
+        "<div style='height:460px; border:1px solid #d0d7de; border-radius:8px; "
+        "padding:20px; display:flex; flex-direction:column; justify-content:center; gap:14px;'>"
+        "<div style='font-size:14px; line-height:1.5;'>"
+        "The live 3D map viewer opens more reliably in a separate browser tab."
         "</div>"
-        f"<div style='margin-top:8px; font-family:monospace; font-size:12px;'>viewer: {safe_url}</div>"
+        f"<a href='{safe_url}' target='_blank' rel='noopener noreferrer' "
+        "style='display:inline-block; width:fit-content; padding:10px 14px; "
+        "background:#0f766e; color:#ffffff; text-decoration:none; border-radius:8px; "
+        "font-weight:600;'>Open 3D Map Viewer</a>"
+        f"<div style='font-family:monospace; font-size:12px; word-break:break-all;'>{safe_url}</div>"
+        "</div>"
     )
 
 
@@ -221,8 +228,8 @@ def _viewer_placeholder(message: str) -> str:
     msg = html.escape(message)
     return (
         "<div style='height:460px; border:1px dashed #d0d7de; border-radius:8px; "
-        "display:flex; align-items:center; justify-content:center; padding:12px; "
-        "font-family:monospace; font-size:12px;'>"
+        "display:flex; align-items:center; justify-content:center; padding:18px; "
+        "font-family:monospace; font-size:12px; text-align:center;'>"
         f"{msg}"
         "</div>"
     )
@@ -248,9 +255,29 @@ def _decode_image_bytes(blob: bytes) -> Optional[np.ndarray]:
     return None
 
 
-def _latest_image_in_dir(path: Path) -> tuple[Optional[np.ndarray], str]:
+def _decode_mask_bytes(blob: bytes) -> Optional[np.ndarray]:
+    if not blob:
+        return None
+    if cv2 is not None:
+        arr = np.frombuffer(blob, dtype=np.uint8)
+        mask = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+        if mask is None:
+            return None
+        return mask
+    if Image is not None:
+        try:
+            from io import BytesIO
+
+            with Image.open(BytesIO(blob)) as im:
+                return np.array(im)
+        except Exception:
+            return None
+    return None
+
+
+def _latest_file_in_dir(path: Path) -> Optional[Path]:
     if not path.is_dir():
-        return None, f"{path} (missing)"
+        return None
     latest: Optional[Path] = None
     latest_mtime = -1.0
     for f in path.iterdir():
@@ -265,6 +292,13 @@ def _latest_image_in_dir(path: Path) -> tuple[Optional[np.ndarray], str]:
         if mtime > latest_mtime:
             latest_mtime = mtime
             latest = f
+    return latest
+
+
+def _latest_image_in_dir(path: Path) -> tuple[Optional[np.ndarray], str]:
+    if not path.is_dir():
+        return None, f"{path} (missing)"
+    latest = _latest_file_in_dir(path)
     if latest is None:
         return None, f"{path} (no images yet)"
     try:
@@ -300,6 +334,89 @@ def _latest_overlay_image(demo_root: Path) -> tuple[Optional[np.ndarray], str]:
     if run_dir is None:
         return None, f"{demo_root} (no demo_* run yet)"
     return _latest_image_in_dir(run_dir / "segmentation_overlays")
+
+
+def _latest_mask_path(demo_root: Path) -> str:
+    run_dir = _latest_demo_run_dir(demo_root)
+    if run_dir is None:
+        return ""
+    latest = _latest_file_in_dir(run_dir / "segmentation_masks")
+    return str(latest) if latest is not None else ""
+
+
+def _capture_tmux_pane(session: str, window: str, lines: int = 120) -> str:
+    if not session.strip():
+        return ""
+    proc = subprocess.run(
+        ["tmux", "capture-pane", "-p", "-t", f"{session}:{window}", "-S", f"-{max(1, int(lines))}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout
+
+
+def _tail_text_file(path: Path, max_lines: int = 120) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    return "\n".join(lines[-max(1, int(max_lines)):])
+
+
+def _semantic_log_excerpt(text: str, limit: int = 8) -> list[str]:
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return []
+    sem_lines = [ln for ln in lines if ("[SEM" in ln) or ("semantic_inference" in ln) or ("SEMHEAD" in ln)]
+    if sem_lines:
+        return sem_lines[-limit:]
+    return lines[-limit:]
+
+
+def _mask_summary(mask: Optional[np.ndarray], mask_path: str, overlay_path: str, gpu_recent: str) -> str:
+    lines: list[str] = []
+    lines.append(f"mask={mask_path or '(no mask yet)'}")
+    lines.append(f"overlay={overlay_path or '(no overlay yet)'}")
+    if mask is None:
+        if mask_path:
+            lines.append("mask_decode=failed")
+    else:
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            if arr.shape[2] == 1:
+                arr = arr[..., 0]
+            elif (
+                arr.shape[2] >= 3
+                and np.array_equal(arr[..., 0], arr[..., 1])
+                and np.array_equal(arr[..., 0], arr[..., 2])
+            ):
+                arr = arr[..., 0]
+            else:
+                lines.append(f"warning=mask file decoded as {arr.shape}; expected single-channel labels")
+                arr = arr[..., 0]
+        uniq, counts = np.unique(arr.reshape(-1), return_counts=True)
+        order = np.argsort(counts)[::-1]
+        top = [f"{int(uniq[i])}:{int(counts[i])}" for i in order[:6]]
+        lines.append(f"mask_shape={tuple(arr.shape)} dtype={arr.dtype}")
+        lines.append(f"unique_labels={int(len(uniq))}")
+        lines.append("top_labels=" + (", ".join(top) if top else "(none)"))
+        if len(uniq) <= 1:
+            lines.append("warning=latest semantic mask has only one label")
+    excerpt = _semantic_log_excerpt(gpu_recent)
+    if excerpt:
+        lines.append("recent_semantic_log:")
+        lines.extend(excerpt)
+    else:
+        lines.append("recent_semantic_log=(none)")
+    return "\n".join(lines)
 
 
 def _latest_processed_rgb(demo_root: Path) -> tuple[Optional[np.ndarray], str]:
@@ -403,6 +520,29 @@ def latest_image(path: Path):
             best = f
     return str(best) if best is not None else ""
 
+def capture_recent_tmux(session_name: str, window_name: str, lines: int):
+    proc = subprocess.run(
+        ["tmux", "capture-pane", "-p", "-t", f"{session_name}:{window_name}", "-S", f"-{max(1, lines)}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout
+
+def tail_text_file(path: Path, max_lines: int):
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    return "\\n".join(lines[-max(1, max_lines):])
+
 now = time.strftime("%Y-%m-%d %H:%M:%S")
 status = f"[{{now}}] stopped (tmux session '{{session}}' not found)"
 tmux_has = subprocess.run(["tmux", "has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -437,8 +577,15 @@ input_path = latest_image(raw_dir)
 if not input_path and run_dir is not None:
     input_path = latest_image(run_dir / "rgb")
 overlay_path = ""
+mask_path = ""
+log_path = ""
 if run_dir is not None:
     overlay_path = latest_image(run_dir / "segmentation_overlays")
+    mask_path = latest_image(run_dir / "segmentation_masks")
+    log_candidate = run_dir / "gpu_pipeline.log"
+    if log_candidate.is_file():
+        log_path = str(log_candidate)
+gpu_recent = tail_text_file(Path(log_path), 120) if log_path else capture_recent_tmux(session, "gpu-pipeline", 120)
 
 payload = {{
     "status": status,
@@ -447,6 +594,9 @@ payload = {{
     "run_dir": str(run_dir) if run_dir is not None else "",
     "input_path": input_path,
     "overlay_path": overlay_path,
+    "mask_path": mask_path,
+    "log_path": log_path,
+    "gpu_recent": gpu_recent,
 }}
 print(json.dumps(payload))
 """
@@ -460,6 +610,9 @@ print(json.dumps(payload))
             "error": _tail(err_s, 1200),
             "input_path": "",
             "overlay_path": "",
+            "mask_path": "",
+            "log_path": "",
+            "gpu_recent": "",
             "gpu_ip": "",
             "state_file": state_file,
             "run_dir": "",
@@ -471,6 +624,9 @@ print(json.dumps(payload))
             "error": _tail(out_s + "\n" + err_s, 1200),
             "input_path": "",
             "overlay_path": "",
+            "mask_path": "",
+            "log_path": "",
+            "gpu_recent": "",
             "gpu_ip": "",
             "state_file": state_file,
             "run_dir": "",
@@ -531,7 +687,7 @@ def poll_dashboard(
     ssh_key: str,
     ssh_options: str,
     local_viewer_port: float,
-) -> tuple[Optional[np.ndarray], str, Optional[np.ndarray], str, str]:
+) -> tuple[Optional[np.ndarray], str, Optional[np.ndarray], str, str, str]:
     mode = execution_mode.strip().lower()
     vp = int(viewer_port)
     local_vp = int(local_viewer_port)
@@ -542,8 +698,10 @@ def poll_dashboard(
 
         input_img = None
         overlay_img = None
+        mask_img = None
         input_info = probe.get("input_path", "") or "(no input image yet)"
         overlay_info = probe.get("overlay_path", "") or "(no overlay yet)"
+        mask_info = probe.get("mask_path", "") or "(no mask yet)"
 
         if probe.get("input_path"):
             blob, msg = _remote_read_file_bytes(cfg, probe["input_path"])
@@ -562,6 +720,15 @@ def poll_dashboard(
                     overlay_info = f"{probe['overlay_path']} (decode failed)"
             else:
                 overlay_info = f"{probe['overlay_path']} ({msg})"
+
+        if probe.get("mask_path"):
+            blob, msg = _remote_read_file_bytes(cfg, probe["mask_path"])
+            if blob is not None:
+                mask_img = _decode_mask_bytes(blob)
+                if mask_img is None:
+                    mask_info = f"{probe['mask_path']} (decode failed)"
+            else:
+                mask_info = f"{probe['mask_path']} ({msg})"
 
         manual = manual_viewer_url.strip()
         viewer_source = ""
@@ -590,12 +757,20 @@ def poll_dashboard(
             f"mode=ssh target={cfg.target}\n"
             f"input={input_info}\n"
             f"overlay={overlay_info}\n"
+            f"mask={mask_info}\n"
+            f"log={probe.get('log_path', '(none yet)')}\n"
             f"viewer={viewer_source}\n"
             f"state_file={probe.get('state_file', state_file)}"
         )
         if extra_err:
             stream_status += f"\nprobe_error={extra_err}"
-        return input_img, viewer_panel, overlay_img, status, stream_status
+        semantic_status = _mask_summary(
+            mask=mask_img,
+            mask_path=str(probe.get("mask_path", "")).strip(),
+            overlay_path=str(probe.get("overlay_path", "")).strip(),
+            gpu_recent=str(probe.get("gpu_recent", "")),
+        )
+        return input_img, viewer_panel, overlay_img, status, stream_status, semantic_status
 
     _stop_tunnel()
     demo_root_path = Path(demo_root).expanduser()
@@ -604,6 +779,21 @@ def poll_dashboard(
     if input_img is None:
         input_img, input_src = _latest_processed_rgb(demo_root_path)
     overlay_img, overlay_src = _latest_overlay_image(demo_root_path)
+    mask_src = _latest_mask_path(demo_root_path)
+    mask_img = None
+    if mask_src:
+        try:
+            mask_img = _decode_mask_bytes(Path(mask_src).read_bytes())
+        except Exception:
+            mask_img = None
+            mask_src = f"{mask_src} (failed to read)"
+    run_dir = _latest_demo_run_dir(demo_root_path)
+    log_path = ""
+    if run_dir is not None:
+        log_candidate = run_dir / "gpu_pipeline.log"
+        if log_candidate.is_file():
+            log_path = str(log_candidate)
+    gpu_recent = _tail_text_file(Path(log_path), max_lines=120) if log_path else _capture_tmux_pane(session, "gpu-pipeline", lines=120)
 
     url, source = _viewer_url_local(
         session=session,
@@ -612,8 +802,12 @@ def poll_dashboard(
         state_file=state_file,
     )
     status = _pipeline_status_text_local(session)
-    stream_status = f"mode=local\ninput={input_src}\noverlay={overlay_src}\nviewer_source={source}"
-    return input_img, _viewer_html(url), overlay_img, status, stream_status
+    stream_status = (
+        f"mode=local\ninput={input_src}\noverlay={overlay_src}\nmask={mask_src or '(no mask yet)'}\n"
+        f"log={log_path or '(none yet)'}\nviewer_source={source}"
+    )
+    semantic_status = _mask_summary(mask=mask_img, mask_path=mask_src, overlay_path=overlay_src, gpu_recent=gpu_recent)
+    return input_img, _viewer_html(url), overlay_img, status, stream_status, semantic_status
 
 
 def start_pipeline(
@@ -809,7 +1003,7 @@ def build_app(
         gr.Markdown(
             "## VGGT Live Dashboard\n"
             "Run this UI on your Mac. In `ssh` mode, control commands and file polling happen over SSH on the HPC head node. "
-            "The map pane uses an automatic SSH local port forward from Mac -> head -> GPU."
+            "The viewer link uses an automatic SSH local port forward from Mac -> head -> GPU."
         )
 
         with gr.Row():
@@ -819,7 +1013,9 @@ def build_app(
 
         with gr.Row():
             pipeline_status = gr.Textbox(label="Pipeline Status", lines=2, interactive=False)
-            stream_status = gr.Textbox(label="Stream Status", lines=5, interactive=False)
+            stream_status = gr.Textbox(label="Stream Status", lines=6, interactive=False)
+
+        semantic_status = gr.Textbox(label="Semantic Diagnostics", lines=10, interactive=False)
 
         with gr.Accordion("Runtime Configuration", open=True):
             execution_mode = gr.Radio(
@@ -872,7 +1068,7 @@ def build_app(
 
         with gr.Row():
             input_img = gr.Image(label="Input RGB", type="numpy", format="png")
-            viewer_html = gr.HTML(label="Live Map Viewer")
+            viewer_html = gr.HTML(label="3D Map Viewer")
             overlay_img = gr.Image(label="Semantic Overlay", type="numpy", format="png")
 
         action_log = gr.Textbox(label="Start/Stop Command Output", lines=14, interactive=False)
@@ -891,7 +1087,7 @@ def build_app(
             ssh_options,
             local_viewer_port,
         ]
-        poll_outputs = [input_img, viewer_html, overlay_img, pipeline_status, stream_status]
+        poll_outputs = [input_img, viewer_html, overlay_img, pipeline_status, stream_status, semantic_status]
 
         timer = gr.Timer(value=POLL_SEC)
         timer.tick(fn=poll_dashboard, inputs=poll_inputs, outputs=poll_outputs)
