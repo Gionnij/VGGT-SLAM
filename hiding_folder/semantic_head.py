@@ -89,7 +89,10 @@ class SemanticHead(nn.Module):
 
         stride_mode = os.getenv("VGGT_SEM_STRIDE_MODE", "s8").strip().lower()
         if stride_mode in ("s4", "4", "dense4"):
-            feature_strides = [4, 8, 16, 32]
+            # Keep res3/res4/res5 strides unchanged so the Mask2Former pixel-decoder
+            # module layout remains checkpoint-compatible (adapter_2/layer_2 still present),
+            # while increasing only the highest-resolution branch (res2) to stride-4.
+            feature_strides = [4, 16, 32, 64]
         elif stride_mode in ("s8", "8", "legacy", "default"):
             feature_strides = [8, 16, 32, 64]
         else:
