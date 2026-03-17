@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 Create train/val/test scene splits from:
-  - all available scene ids under a root directory
+  - all available scene ids under a root directory, or
+  - a fixed list of available scene ids
   - an existing train scene list
 
 Typical use for your setup:
   python tools/make_scene_splits.py \
-    --all-scenes-root /deepstore/datasets/itc/eos/scannetpp/semantics_chunks \
+    --all-scenes-file /home/s2984792/scannetpp_raster_dec2024/label_stats/scenes_with_labels.txt \
     --train-scenes-file /home/s2984792/scannetpp_raster_dec2024/label_stats/scenes_selected_60.txt \
     --out-dir /home/s2984792/scannetpp_raster_dec2024/label_stats \
-    --val-count 49
+    --val-count 5 \
+    --test-count 5
 """
 
 from __future__ import annotations
@@ -77,9 +79,27 @@ def _write_list(path: Path, values: List[str]) -> None:
     path.write_text(body, encoding="utf-8")
 
 
+def _load_available_scenes(*, all_scenes_root: str, all_scenes_file: str) -> Tuple[List[str], str]:
+    root_arg = str(all_scenes_root or "").strip()
+    file_arg = str(all_scenes_file or "").strip()
+    if bool(root_arg) == bool(file_arg):
+        raise ValueError("Provide exactly one of --all-scenes-root or --all-scenes-file.")
+
+    if root_arg:
+        root = Path(root_arg).expanduser()
+        return _list_scenes_from_root(root), str(root)
+
+    src = Path(file_arg).expanduser()
+    scenes = sorted(set(_read_scene_list(src)))
+    if not scenes:
+        raise RuntimeError(f"No scenes found in available-scenes file: {src}")
+    return scenes, str(src)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Generate deterministic val/test splits from all-scenes minus train-scenes.")
-    p.add_argument("--all-scenes-root", required=True, help="Directory containing all scene folders.")
+    p.add_argument("--all-scenes-root", help="Directory containing all scene folders.")
+    p.add_argument("--all-scenes-file", help="Text file with the full available scene universe (one scene id per line).")
     p.add_argument("--train-scenes-file", required=True, help="Train scene list (one scene id per line).")
     p.add_argument("--out-dir", required=True, help="Output directory for split files.")
     p.add_argument("--train-out", default="scenes_train.txt")
@@ -98,11 +118,13 @@ def main() -> None:
     p.add_argument("--test-count", type=int, default=0, help="0 means auto.")
     args = p.parse_args()
 
-    all_root = Path(args.all_scenes_root).expanduser()
     train_file = Path(args.train_scenes_file).expanduser()
     out_dir = Path(args.out_dir).expanduser()
 
-    all_scenes = _list_scenes_from_root(all_root)
+    all_scenes, all_source = _load_available_scenes(
+        all_scenes_root=args.all_scenes_root,
+        all_scenes_file=args.all_scenes_file,
+    )
     train_scenes_raw = _read_scene_list(train_file)
     train_scenes: List[str] = sorted(set(train_scenes_raw))
     all_set: Set[str] = set(all_scenes)
@@ -134,7 +156,7 @@ def main() -> None:
     _write_list(unused_path, unused_scenes)
 
     summary = {
-        "all_scenes_root": str(all_root),
+        "all_scenes_source": all_source,
         "train_scenes_file": str(train_file),
         "strategy": args.strategy,
         "seed": int(args.seed),
@@ -168,7 +190,7 @@ def main() -> None:
     print(f"[out] test:  {test_path}")
     print(f"[out] summary: {summary_path}")
     if missing_train:
-        print(f"[warn] {len(missing_train)} train scenes were not found under all-scenes root.")
+        print(f"[warn] {len(missing_train)} train scenes were not found in the available scene universe.")
 
 
 if __name__ == "__main__":

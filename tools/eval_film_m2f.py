@@ -5,7 +5,7 @@ import json
 import random
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -276,6 +276,104 @@ def _write_csv(path: Path, rows: Sequence[Dict]) -> None:
             writer.writerow({k: row.get(k) for k in fieldnames})
 
 
+def _load_sample_manifest(path: Path) -> List[Dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    samples = payload.get("samples")
+    if not isinstance(samples, list):
+        raise ValueError(f"Sample manifest missing list field 'samples': {path}")
+    out: List[Dict[str, Any]] = []
+    for item in samples:
+        if not isinstance(item, dict):
+            raise ValueError(f"Sample manifest contains non-dict entry: {path}")
+        sample = dict(item)
+        image_size = sample.get("image_size")
+        if isinstance(image_size, list):
+            sample["image_size"] = tuple(image_size)
+        out.append(sample)
+    return out
+
+
+def _write_sample_manifest(
+    path: Path,
+    *,
+    samples: Sequence[Dict[str, Any]],
+    dataset_root: Path,
+    scenes_file: Optional[str],
+    scenes: Optional[Sequence[str]],
+    chunk_files: Sequence[Path],
+    num_samples_before: int,
+    args: argparse.Namespace,
+) -> None:
+    payload = {
+        "dataset_root": str(dataset_root),
+        "scenes_file": str(Path(scenes_file).expanduser()) if scenes_file else None,
+        "scenes": list(scenes) if scenes is not None else None,
+        "num_chunk_files": len(chunk_files),
+        "num_samples_before_subsample": int(num_samples_before),
+        "num_samples_selected": len(samples),
+        "selection": {
+            "scene_offset": int(args.scene_offset),
+            "scene_stride": int(args.scene_stride),
+            "max_scenes": int(args.max_scenes),
+            "max_chunks": int(args.max_chunks),
+            "sample_step": int(args.sample_step),
+            "max_samples_per_scene": int(args.max_samples_per_scene),
+            "max_samples": int(args.max_samples),
+            "sample_mode": str(args.sample_mode),
+            "seed": int(args.seed),
+        },
+        "samples": [
+            {
+                "scene_id": str(sample.get("scene_id", "")),
+                "frame_path": str(sample.get("frame_path", "")),
+                "label_path": str(sample.get("label_path", "")),
+                "label_chunk_path": sample.get("label_chunk_path"),
+                "chunk_path": str(sample.get("chunk_path", "")),
+                "frame_idx": int(sample.get("frame_idx", 0)),
+                "image_size": list(sample.get("image_size", [])),
+            }
+            for sample in samples
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _load_class_names(path_str: Optional[str], num_classes: int) -> List[str]:
+    vals = _load_list_from_file(path_str)
+    if not vals:
+        return [str(i) for i in range(num_classes)]
+    if len(vals) < num_classes:
+        vals = list(vals) + [str(i) for i in range(len(vals), num_classes)]
+    return list(vals[:num_classes])
+
+
+def _write_per_class_csv(path: Path, *, iou: Sequence[float], class_names: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["class_id", "class_name", "iou"])
+        writer.writeheader()
+        for idx, score in enumerate(iou):
+            writer.writerow(
+                {
+                    "class_id": idx,
+                    "class_name": class_names[idx] if idx < len(class_names) else str(idx),
+                    "iou": float(score),
+                }
+            )
+
+
+def _write_confusion_csv(path: Path, *, conf: Sequence[Sequence[int]], class_names: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = ["gt/pred"] + [class_names[idx] if idx < len(class_names) else str(idx) for idx in range(len(conf))]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for idx, row in enumerate(conf):
+            label = class_names[idx] if idx < len(class_names) else str(idx)
+            writer.writerow([label, *row])
+
+
 def collate_fn_eval(batch: List[Dict]) -> Dict:
     dino = torch.stack([b["dino"] for b in batch], dim=0)
     dpt_levels = []
@@ -309,7 +407,8 @@ def evaluate_checkpoint(
     export_dir: Path,
     dataset_root: Path,
     overlay_alpha: float,
-) -> Dict[str, float]:
+    collect_details: bool = False,
+) -> Dict[str, Any]:
     model.eval()
     loss_sum = 0.0
     n_batches = 0
@@ -435,7 +534,7 @@ def evaluate_checkpoint(
     miou = float(iou.mean().item())
     pixel_acc = float(tp.sum().float().item() / max(1, conf.sum().item()))
 
-    return {
+    out: Dict[str, Any] = {
         "val_loss": loss_sum / max(1, n_batches),
         "miou": miou,
         "pixel_acc": pixel_acc,
@@ -443,6 +542,10 @@ def evaluate_checkpoint(
         "num_batches": n_batches,
         "num_exports": exported,
     }
+    if collect_details:
+        out["per_class_iou"] = [float(v) for v in iou.tolist()]
+        out["confusion_matrix"] = conf.tolist()
+    return out
 
 
 def main() -> None:
@@ -453,8 +556,10 @@ def main() -> None:
     ap.add_argument("--label-chunk-subdir", default="label_chunks")
     ap.add_argument("--label-chunk-ext", default=".pt")
     ap.add_argument("--chunk-format", choices=["auto", "pt", "safetensors"], default="auto")
-    ap.add_argument("--scenes-file", required=True)
+    ap.add_argument("--scenes-file")
     ap.add_argument("--scenes", help="Comma-separated scenes list (overridden by --scenes-file).")
+    ap.add_argument("--sample-manifest-in", type=Path, help="Optional JSON sample manifest to evaluate exactly.")
+    ap.add_argument("--sample-manifest-out", type=Path, help="Optional JSON dump of the selected samples.")
     ap.add_argument("--scene-offset", type=int, default=0, help="Skip first N scenes from the selected scene list.")
     ap.add_argument("--scene-stride", type=int, default=1, help="Take every N-th scene from the selected scene list.")
     ap.add_argument("--max-scenes", type=int, default=0, help="0 = all selected scenes.")
@@ -503,6 +608,9 @@ def main() -> None:
     ap.add_argument("--sort-order", choices=["auto", "asc", "desc"], default="auto")
     ap.add_argument("--out-json", type=Path)
     ap.add_argument("--out-csv", type=Path)
+    ap.add_argument("--out-per-class-csv", type=Path, help="Write per-class IoU CSV (best used with one checkpoint).")
+    ap.add_argument("--out-confusion-csv", type=Path, help="Write confusion matrix CSV (best used with one checkpoint).")
+    ap.add_argument("--class-names-file", help="Optional class names file aligned with remapped class ids.")
     ap.add_argument("--export-masks", action="store_true", help="Export qualitative samples from top checkpoints.")
     ap.add_argument(
         "--export-raw",
@@ -518,17 +626,27 @@ def main() -> None:
     module = _load_train_module()
 
     dataset_root = Path(args.dataset_root).expanduser()
-    scenes_from_file = _load_list_from_file(args.scenes_file)
-    if scenes_from_file and args.scenes:
-        print("[info] scenes-file provided; overriding --scenes.")
-    scenes_cli = [s.strip() for s in args.scenes.split(",")] if args.scenes else None
-    scenes = _subset_scenes(
-        scenes_from_file or scenes_cli,
-        scene_offset=args.scene_offset,
-        scene_stride=args.scene_stride,
-        max_scenes=args.max_scenes,
-    )
-    if scenes is not None:
+    scenes: Optional[List[str]] = None
+    chunk_files: List[Path] = []
+    samples: List[Dict[str, Any]] = []
+    n_samples_before = 0
+    manifest_in_path = Path(args.sample_manifest_in).expanduser() if args.sample_manifest_in else None
+    if manifest_in_path is not None:
+        samples = _load_sample_manifest(manifest_in_path)
+        print(f"[info] loaded sample manifest: {manifest_in_path} ({len(samples)} samples)")
+    else:
+        scenes_from_file = _load_list_from_file(args.scenes_file)
+        if scenes_from_file and args.scenes:
+            print("[info] scenes-file provided; overriding --scenes.")
+        scenes_cli = [s.strip() for s in args.scenes.split(",")] if args.scenes else None
+        scenes = _subset_scenes(
+            scenes_from_file or scenes_cli,
+            scene_offset=args.scene_offset,
+            scene_stride=args.scene_stride,
+            max_scenes=args.max_scenes,
+        )
+        if scenes is None:
+            raise ValueError("Provide one of --sample-manifest-in, --scenes-file, or --scenes.")
         print(f"[info] selected scenes: {len(scenes)}")
 
     ignore_classes = _parse_ignore_classes(args.ignore_classes)
@@ -550,31 +668,47 @@ def main() -> None:
         else:
             print(f"[info] remap_classes_file provided; keeping user num_classes={args.num_classes}")
 
-    chunk_files = module.list_chunk_files(
-        dataset_root, scenes=scenes, chunk_format=args.chunk_format
-    )
-    if args.max_chunks and args.max_chunks > 0:
-        chunk_files = chunk_files[: int(args.max_chunks)]
-    print(f"[info] selected chunks: {len(chunk_files)}")
-    samples = module.build_or_load_index(
-        chunk_files=chunk_files,
-        labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
-        cache_path=Path(args.index_cache).expanduser() if args.index_cache else None,
-        label_chunk_root=Path(args.label_chunks_root).expanduser() if args.label_chunks_root else None,
-        label_chunk_subdir=args.label_chunk_subdir,
-        label_chunk_ext=args.label_chunk_ext,
-        use_label_chunks=args.use_label_chunks,
-    )
-    n_samples_before = len(samples)
-    samples = _subsample_samples(
-        samples,
-        sample_step=args.sample_step,
-        max_samples_per_scene=args.max_samples_per_scene,
-        max_samples=args.max_samples,
-        sample_mode=args.sample_mode,
-        seed=args.seed,
-    )
-    print(f"[info] selected samples: {len(samples)} (from {n_samples_before})")
+    if manifest_in_path is None:
+        chunk_files = module.list_chunk_files(
+            dataset_root, scenes=scenes, chunk_format=args.chunk_format
+        )
+        if args.max_chunks and args.max_chunks > 0:
+            chunk_files = chunk_files[: int(args.max_chunks)]
+        print(f"[info] selected chunks: {len(chunk_files)}")
+        samples = module.build_or_load_index(
+            chunk_files=chunk_files,
+            labels_root=Path(args.labels_root).expanduser() if args.labels_root else None,
+            cache_path=Path(args.index_cache).expanduser() if args.index_cache else None,
+            label_chunk_root=Path(args.label_chunks_root).expanduser() if args.label_chunks_root else None,
+            label_chunk_subdir=args.label_chunk_subdir,
+            label_chunk_ext=args.label_chunk_ext,
+            use_label_chunks=args.use_label_chunks,
+        )
+        n_samples_before = len(samples)
+        samples = _subsample_samples(
+            samples,
+            sample_step=args.sample_step,
+            max_samples_per_scene=args.max_samples_per_scene,
+            max_samples=args.max_samples,
+            sample_mode=args.sample_mode,
+            seed=args.seed,
+        )
+        print(f"[info] selected samples: {len(samples)} (from {n_samples_before})")
+        if args.sample_manifest_out:
+            manifest_out_path = Path(args.sample_manifest_out).expanduser()
+            _write_sample_manifest(
+                manifest_out_path,
+                samples=samples,
+                dataset_root=dataset_root,
+                scenes_file=args.scenes_file,
+                scenes=scenes,
+                chunk_files=chunk_files,
+                num_samples_before=n_samples_before,
+                args=args,
+            )
+            print(f"[info] wrote {manifest_out_path}")
+    else:
+        print(f"[info] selected samples: {len(samples)} (from manifest)")
 
     ds = module.ChunkDataset(
         samples,
@@ -629,7 +763,9 @@ def main() -> None:
     if not checkpoints:
         raise RuntimeError(f"No checkpoints found in {ckpt_dir}")
 
+    detail_outputs_requested = bool(args.out_per_class_csv or args.out_confusion_csv)
     results: List[Dict] = []
+    details_by_checkpoint: Dict[str, Dict[str, Any]] = {}
     for idx, ckpt_path in enumerate(checkpoints):
         print(f"[info] evaluating {ckpt_path.name} ({idx + 1}/{len(checkpoints)})")
         payload = torch.load(ckpt_path, map_location="cpu")
@@ -650,6 +786,7 @@ def main() -> None:
             export_dir=args.export_dir,
             dataset_root=dataset_root,
             overlay_alpha=args.overlay_alpha,
+            collect_details=detail_outputs_requested and len(checkpoints) == 1,
         )
         epoch, step = _parse_epoch_step_from_name(ckpt_path.name)
         row = {
@@ -657,9 +794,11 @@ def main() -> None:
             "checkpoint_name": ckpt_path.name,
             "epoch": epoch,
             "step": step,
-            **metrics,
+            **{k: v for k, v in metrics.items() if k not in {"per_class_iou", "confusion_matrix"}},
         }
         results.append(row)
+        if "per_class_iou" in metrics or "confusion_matrix" in metrics:
+            details_by_checkpoint[str(ckpt_path)] = metrics
         print(
             f"[result] loss={metrics['val_loss']:.4f} "
             f"mIoU={metrics['miou']:.4f} "
@@ -691,22 +830,64 @@ def main() -> None:
         print(f"[info] wrote {args.out_csv}")
 
     if args.out_json:
+        selection_payload = None
+        if manifest_in_path is None:
+            selection_payload = {
+                "scene_offset": int(args.scene_offset),
+                "scene_stride": int(args.scene_stride),
+                "max_scenes": int(args.max_scenes),
+                "max_chunks": int(args.max_chunks),
+                "sample_step": int(args.sample_step),
+                "max_samples_per_scene": int(args.max_samples_per_scene),
+                "max_samples": int(args.max_samples),
+                "sample_mode": str(args.sample_mode),
+                "seed": int(args.seed),
+            }
         payload = {
             "split": args.split_name,
             "dataset_root": str(dataset_root),
-            "scenes_file": str(Path(args.scenes_file).expanduser()),
+            "scenes_file": str(Path(args.scenes_file).expanduser()) if args.scenes_file else None,
+            "scenes": list(scenes) if scenes is not None else None,
+            "sample_manifest_in": str(manifest_in_path) if manifest_in_path else None,
+            "sample_manifest_out": str(Path(args.sample_manifest_out).expanduser()) if args.sample_manifest_out else None,
             "num_scenes": len(scenes) if scenes is not None else None,
+            "num_chunk_files": len(chunk_files) if chunk_files else None,
+            "num_samples_before_subsample": int(n_samples_before) if manifest_in_path is None else None,
             "num_samples": len(ds),
             "num_checkpoints": len(ranked),
             "num_checkpoints_found": len(all_checkpoints),
             "checkpoint_select": args.checkpoint_select,
             "sort_by": args.sort_by,
             "sort_order": "desc" if reverse else "asc",
+            "selection": selection_payload,
             "results": ranked,
         }
         args.out_json.parent.mkdir(parents=True, exist_ok=True)
         args.out_json.write_text(json.dumps(payload, indent=2))
         print(f"[info] wrote {args.out_json}")
+
+    if detail_outputs_requested:
+        if len(ranked) != 1:
+            raise ValueError("--out-per-class-csv/--out-confusion-csv currently require evaluating exactly one checkpoint.")
+        detail_key = str(Path(ranked[0]["checkpoint"]))
+        detail_metrics = details_by_checkpoint.get(detail_key)
+        if detail_metrics is None:
+            raise RuntimeError(f"Missing detail metrics for checkpoint: {detail_key}")
+        class_names = _load_class_names(args.class_names_file, args.num_classes)
+        if args.out_per_class_csv:
+            _write_per_class_csv(
+                Path(args.out_per_class_csv).expanduser(),
+                iou=detail_metrics["per_class_iou"],
+                class_names=class_names,
+            )
+            print(f"[info] wrote {args.out_per_class_csv}")
+        if args.out_confusion_csv:
+            _write_confusion_csv(
+                Path(args.out_confusion_csv).expanduser(),
+                conf=detail_metrics["confusion_matrix"],
+                class_names=class_names,
+            )
+            print(f"[info] wrote {args.out_confusion_csv}")
 
     if args.export_masks and args.export_top_k > 0:
         export_indices = _build_export_indices(len(ds), args.export_samples)
