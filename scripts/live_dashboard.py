@@ -1003,11 +1003,7 @@ def build_app(
         ) from exc
 
     with gr.Blocks(title="VGGT Live Dashboard") as demo:
-        gr.Markdown(
-            "## VGGT Live Dashboard\n"
-            "Run this UI on your Mac. In `ssh` mode, control commands and file polling happen over SSH on the HPC head node. "
-            "The viewer link uses an automatic SSH local port forward from Mac -> head -> GPU."
-        )
+        gr.Markdown("## VGGT Live Dashboard")
 
         with gr.Row():
             input_img = gr.Image(label="Input RGB", type="numpy", format="png")
