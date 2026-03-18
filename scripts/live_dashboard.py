@@ -210,16 +210,19 @@ atexit.register(_stop_tunnel)
 def _viewer_html(url: str) -> str:
     safe_url = html.escape(url, quote=True)
     return (
-        "<div style='height:460px; border:1px solid #d0d7de; border-radius:8px; "
-        "padding:20px; display:flex; flex-direction:column; justify-content:center; gap:14px;'>"
-        "<div style='font-size:14px; line-height:1.5;'>"
-        "The live 3D map viewer opens more reliably in a separate browser tab."
+        "<div style='border:1px solid #d0d7de; border-radius:10px; padding:14px 16px; "
+        "display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;'>"
+        "<div style='display:flex; flex-direction:column; gap:6px;'>"
+        "<div style='font-size:14px; line-height:1.4; font-weight:600;'>3D Map Viewer</div>"
+        "<div style='font-size:13px; line-height:1.4;'>"
+        "Open the live map in a separate browser tab."
+        "</div>"
+        f"<div style='font-family:monospace; font-size:12px; word-break:break-all;'>{safe_url}</div>"
         "</div>"
         f"<a href='{safe_url}' target='_blank' rel='noopener noreferrer' "
         "style='display:inline-block; width:fit-content; padding:10px 14px; "
         "background:#0f766e; color:#ffffff; text-decoration:none; border-radius:8px; "
         "font-weight:600;'>Open 3D Map Viewer</a>"
-        f"<div style='font-family:monospace; font-size:12px; word-break:break-all;'>{safe_url}</div>"
         "</div>"
     )
 
@@ -227,8 +230,7 @@ def _viewer_html(url: str) -> str:
 def _viewer_placeholder(message: str) -> str:
     msg = html.escape(message)
     return (
-        "<div style='height:460px; border:1px dashed #d0d7de; border-radius:8px; "
-        "display:flex; align-items:center; justify-content:center; padding:18px; "
+        "<div style='border:1px dashed #d0d7de; border-radius:10px; padding:14px 16px; "
         "font-family:monospace; font-size:12px; text-align:center;'>"
         f"{msg}"
         "</div>"
@@ -1008,15 +1010,24 @@ def build_app(
         )
 
         with gr.Row():
+            input_img = gr.Image(label="Input RGB", type="numpy", format="png")
+            overlay_img = gr.Image(label="Semantic Overlay", type="numpy", format="png")
+
+        with gr.Row():
+            viewer_html = gr.HTML(label="3D Map Viewer")
+
+        with gr.Row():
             start_btn = gr.Button("Start Pipeline", variant="primary")
             stop_btn = gr.Button("Stop Pipeline", variant="stop")
             refresh_btn = gr.Button("Refresh Now")
 
         with gr.Row():
-            pipeline_status = gr.Textbox(label="Pipeline Status", lines=2, interactive=False)
-            stream_status = gr.Textbox(label="Stream Status", lines=6, interactive=False)
+            pipeline_status = gr.Textbox(label="Pipeline Status", lines=4, interactive=False)
+            stream_status = gr.Textbox(label="Stream Status", lines=4, interactive=False)
 
-        semantic_status = gr.Textbox(label="Semantic Diagnostics", lines=10, interactive=False)
+        with gr.Row():
+            semantic_status = gr.Textbox(label="Semantic Diagnostics", lines=10, interactive=False)
+            action_log = gr.Textbox(label="Start/Stop Command Output", lines=10, interactive=False)
 
         with gr.Accordion("Runtime Configuration", open=True):
             execution_mode = gr.Radio(
@@ -1066,13 +1077,6 @@ def build_app(
                 value=state_file_default,
                 placeholder="default: ~/.vggt_active_gpu_<session>.env",
             )
-
-        with gr.Row():
-            input_img = gr.Image(label="Input RGB", type="numpy", format="png")
-            viewer_html = gr.HTML(label="3D Map Viewer")
-            overlay_img = gr.Image(label="Semantic Overlay", type="numpy", format="png")
-
-        action_log = gr.Textbox(label="Start/Stop Command Output", lines=14, interactive=False)
 
         poll_inputs = [
             session,
