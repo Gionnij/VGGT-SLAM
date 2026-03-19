@@ -30,6 +30,7 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
 POLL_SEC = 1.0
+_CLASS_NAME_CACHE: Optional[list[str]] = None
 
 _TUNNEL_PROC: Optional[subprocess.Popen[bytes]] = None
 _TUNNEL_SIG: Optional[tuple[str, str, str, str, int, int]] = None
@@ -69,6 +70,75 @@ def _tail(text: str, limit: int = 8000) -> str:
     if len(text) <= limit:
         return text
     return f"...(truncated {len(text) - limit} chars)\n{text[-limit:]}"
+
+
+def _read_nonempty_lines(path: Path) -> list[str]:
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if line.strip()
+    ]
+
+
+def _resolve_first_existing_path(candidates: list[Path]) -> Optional[Path]:
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_local_label_names() -> list[str]:
+    global _CLASS_NAME_CACHE
+    if _CLASS_NAME_CACHE is not None:
+        return _CLASS_NAME_CACHE
+
+    repo_root = Path(__file__).resolve().parents[1]
+    kept_candidates = []
+    classes_candidates = []
+
+    env_kept = os.getenv("VGGT_DASHBOARD_KEPT_CLASSES_PATH", "").strip()
+    env_classes = os.getenv("VGGT_DASHBOARD_SEMANTIC_CLASSES_PATH", "").strip()
+    if env_kept:
+        kept_candidates.append(Path(env_kept).expanduser())
+    if env_classes:
+        classes_candidates.append(Path(env_classes).expanduser())
+
+    kept_candidates.extend(
+        [
+            Path("/Users/giovannichiementin/Desktop/kept_classes_top60.txt"),
+            Path.home() / "Desktop" / "kept_classes_top60.txt",
+            repo_root / "kept_classes_top60.txt",
+        ]
+    )
+    classes_candidates.extend(
+        [
+            Path("/Users/giovannichiementin/Desktop/semantic_classes.txt"),
+            Path.home() / "Desktop" / "semantic_classes.txt",
+            repo_root / "semantic_classes.txt",
+        ]
+    )
+
+    kept_path = _resolve_first_existing_path(kept_candidates)
+    classes_path = _resolve_first_existing_path(classes_candidates)
+    if kept_path is None or classes_path is None:
+        _CLASS_NAME_CACHE = []
+        return _CLASS_NAME_CACHE
+
+    try:
+        kept_ids = [int(x) for x in _read_nonempty_lines(kept_path)]
+        semantic_names = _read_nonempty_lines(classes_path)
+    except Exception:
+        _CLASS_NAME_CACHE = []
+        return _CLASS_NAME_CACHE
+
+    names: list[str] = []
+    for global_idx in kept_ids:
+        if 0 <= global_idx < len(semantic_names):
+            names.append(semantic_names[global_idx])
+        else:
+            names.append(f"class_{global_idx}")
+    _CLASS_NAME_CACHE = names
+    return _CLASS_NAME_CACHE
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -346,6 +416,18 @@ def _latest_mask_path(demo_root: Path) -> str:
     return str(latest) if latest is not None else ""
 
 
+def _matching_rgb_path(run_dir: Optional[Path], anchor_path: str) -> str:
+    if run_dir is None or not anchor_path:
+        return ""
+    stem = Path(anchor_path).stem
+    rgb_dir = run_dir / "rgb"
+    for ext in IMAGE_EXTS:
+        candidate = rgb_dir / f"{stem}{ext}"
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
 def _capture_tmux_pane(session: str, window: str, lines: int = 120) -> str:
     if not session.strip():
         return ""
@@ -419,6 +501,91 @@ def _mask_summary(mask: Optional[np.ndarray], mask_path: str, overlay_path: str,
     else:
         lines.append("recent_semantic_log=(none)")
     return "\n".join(lines)
+
+
+def _legend_color_rgb(
+    label_mask: np.ndarray,
+    label_id: int,
+    overlay_img: Optional[np.ndarray],
+    rgb_img: Optional[np.ndarray],
+) -> tuple[int, int, int]:
+    region = label_mask == label_id
+    if not np.any(region):
+        return (127, 127, 127)
+
+    if (
+        overlay_img is not None
+        and rgb_img is not None
+        and overlay_img.shape[:2] == label_mask.shape
+        and rgb_img.shape[:2] == label_mask.shape
+    ):
+        pure = np.clip(
+            2.0 * overlay_img.astype(np.float32) - rgb_img.astype(np.float32),
+            0.0,
+            255.0,
+        ).astype(np.uint8)
+        pixels = pure[region]
+    elif overlay_img is not None and overlay_img.shape[:2] == label_mask.shape:
+        pixels = overlay_img[region]
+    else:
+        return (127, 127, 127)
+
+    if pixels.ndim != 2 or pixels.shape[0] == 0:
+        return (127, 127, 127)
+    color = np.median(pixels, axis=0).astype(np.uint8)
+    return (int(color[0]), int(color[1]), int(color[2]))
+
+
+def _legend_html(
+    mask: Optional[np.ndarray],
+    overlay_img: Optional[np.ndarray],
+    rgb_img: Optional[np.ndarray],
+) -> str:
+    if mask is None:
+        return (
+            "<div style='border:1px dashed #d0d7de; border-radius:10px; padding:12px 14px; "
+            "font-size:13px; color:#4b5563;'>Legend will appear once a semantic mask is available.</div>"
+        )
+
+    arr = np.asarray(mask)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.ndim != 2:
+        return (
+            "<div style='border:1px dashed #d0d7de; border-radius:10px; padding:12px 14px; "
+            "font-size:13px; color:#4b5563;'>Legend unavailable: mask shape is not 2D.</div>"
+        )
+
+    class_names = _load_local_label_names()
+    uniq, counts = np.unique(arr.reshape(-1), return_counts=True)
+    if uniq.size == 0:
+        return (
+            "<div style='border:1px dashed #d0d7de; border-radius:10px; padding:12px 14px; "
+            "font-size:13px; color:#4b5563;'>Legend unavailable: no labels found in current mask.</div>"
+        )
+
+    order = np.argsort(counts)[::-1]
+    chips: list[str] = []
+    for idx in order:
+        label_id = int(uniq[idx])
+        rgb = _legend_color_rgb(arr, label_id, overlay_img, rgb_img)
+        color_hex = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+        name = class_names[label_id] if 0 <= label_id < len(class_names) else f"label {label_id}"
+        chips.append(
+            "<div style='display:inline-flex; align-items:center; gap:8px; padding:6px 10px; "
+            "border:1px solid #d0d7de; border-radius:999px; background:#ffffff; white-space:nowrap;'>"
+            f"<span style='display:inline-block; width:12px; height:12px; border-radius:3px; "
+            f"background:{color_hex}; border:1px solid rgba(0,0,0,0.18);'></span>"
+            f"<span style='font-size:12px; line-height:1.2;'>{html.escape(name)}</span>"
+            "</div>"
+        )
+
+    return (
+        "<div style='border:1px solid #d0d7de; border-radius:10px; padding:10px 12px; overflow-x:auto;'>"
+        "<div style='display:flex; gap:8px; align-items:center; width:max-content;'>"
+        + "".join(chips)
+        + "</div></div>"
+    )
 
 
 def _latest_processed_rgb(demo_root: Path) -> tuple[Optional[np.ndarray], str]:
@@ -522,6 +689,17 @@ def latest_image(path: Path):
             best = f
     return str(best) if best is not None else ""
 
+def matching_rgb(run_dir: Path, anchor_path: str):
+    if not anchor_path:
+        return ""
+    stem = Path(anchor_path).stem
+    rgb_dir = run_dir / "rgb"
+    for ext in exts:
+        candidate = rgb_dir / f"{stem}{ext}"
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
 def capture_recent_tmux(session_name: str, window_name: str, lines: int):
     proc = subprocess.run(
         ["tmux", "capture-pane", "-p", "-t", session_name + ":" + window_name, "-S", "-" + str(max(1, lines))],
@@ -580,10 +758,14 @@ if not input_path and run_dir is not None:
     input_path = latest_image(run_dir / "rgb")
 overlay_path = ""
 mask_path = ""
+legend_rgb_path = ""
 log_path = ""
 if run_dir is not None:
     overlay_path = latest_image(run_dir / "segmentation_overlays")
     mask_path = latest_image(run_dir / "segmentation_masks")
+    legend_anchor = mask_path or overlay_path
+    if legend_anchor:
+        legend_rgb_path = matching_rgb(run_dir, legend_anchor)
     log_candidate = run_dir / "gpu_pipeline.log"
     if log_candidate.is_file():
         log_path = str(log_candidate)
@@ -597,6 +779,7 @@ payload = {{
     "input_path": input_path,
     "overlay_path": overlay_path,
     "mask_path": mask_path,
+    "legend_rgb_path": legend_rgb_path,
     "log_path": log_path,
     "gpu_recent": gpu_recent,
 }}
@@ -613,6 +796,7 @@ print(json.dumps(payload))
             "input_path": "",
             "overlay_path": "",
             "mask_path": "",
+            "legend_rgb_path": "",
             "log_path": "",
             "gpu_recent": "",
             "gpu_ip": "",
@@ -627,6 +811,7 @@ print(json.dumps(payload))
             "input_path": "",
             "overlay_path": "",
             "mask_path": "",
+            "legend_rgb_path": "",
             "log_path": "",
             "gpu_recent": "",
             "gpu_ip": "",
@@ -689,7 +874,7 @@ def poll_dashboard(
     ssh_key: str,
     ssh_options: str,
     local_viewer_port: float,
-) -> tuple[Optional[np.ndarray], str, Optional[np.ndarray], str, str, str]:
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray], str, str, str, str, str]:
     mode = execution_mode.strip().lower()
     vp = int(viewer_port)
     local_vp = int(local_viewer_port)
@@ -701,6 +886,7 @@ def poll_dashboard(
         input_img = None
         overlay_img = None
         mask_img = None
+        legend_rgb_img = None
         input_info = probe.get("input_path", "") or "(no input image yet)"
         overlay_info = probe.get("overlay_path", "") or "(no overlay yet)"
         mask_info = probe.get("mask_path", "") or "(no mask yet)"
@@ -731,6 +917,15 @@ def poll_dashboard(
                     mask_info = f"{probe['mask_path']} (decode failed)"
             else:
                 mask_info = f"{probe['mask_path']} ({msg})"
+
+        if probe.get("legend_rgb_path"):
+            blob, msg = _remote_read_file_bytes(cfg, probe["legend_rgb_path"])
+            if blob is not None:
+                legend_rgb_img = _decode_image_bytes(blob)
+                if legend_rgb_img is None:
+                    probe["legend_rgb_path"] = f"{probe['legend_rgb_path']} (decode failed)"
+            else:
+                probe["legend_rgb_path"] = f"{probe['legend_rgb_path']} ({msg})"
 
         manual = manual_viewer_url.strip()
         viewer_source = ""
@@ -772,7 +967,8 @@ def poll_dashboard(
             overlay_path=str(probe.get("overlay_path", "")).strip(),
             gpu_recent=str(probe.get("gpu_recent", "")),
         )
-        return input_img, viewer_panel, overlay_img, status, stream_status, semantic_status
+        legend_html = _legend_html(mask=mask_img, overlay_img=overlay_img, rgb_img=legend_rgb_img)
+        return input_img, overlay_img, legend_html, viewer_panel, status, stream_status, semantic_status
 
     _stop_tunnel()
     demo_root_path = Path(demo_root).expanduser()
@@ -790,8 +986,15 @@ def poll_dashboard(
             mask_img = None
             mask_src = f"{mask_src} (failed to read)"
     run_dir = _latest_demo_run_dir(demo_root_path)
+    legend_rgb_img = None
     log_path = ""
     if run_dir is not None:
+        legend_rgb_path = _matching_rgb_path(run_dir, mask_src if mask_src and " (" not in mask_src else overlay_src if overlay_src and " (" not in overlay_src else "")
+        if legend_rgb_path:
+            try:
+                legend_rgb_img = _decode_image_bytes(Path(legend_rgb_path).read_bytes())
+            except Exception:
+                legend_rgb_img = None
         log_candidate = run_dir / "gpu_pipeline.log"
         if log_candidate.is_file():
             log_path = str(log_candidate)
@@ -809,7 +1012,8 @@ def poll_dashboard(
         f"log={log_path or '(none yet)'}\nviewer_source={source}"
     )
     semantic_status = _mask_summary(mask=mask_img, mask_path=mask_src, overlay_path=overlay_src, gpu_recent=gpu_recent)
-    return input_img, _viewer_html(url), overlay_img, status, stream_status, semantic_status
+    legend_html = _legend_html(mask=mask_img, overlay_img=overlay_img, rgb_img=legend_rgb_img)
+    return input_img, overlay_img, legend_html, _viewer_html(url), status, stream_status, semantic_status
 
 
 def start_pipeline(
@@ -1009,6 +1213,8 @@ def build_app(
             input_img = gr.Image(label="Input RGB", type="numpy", format="png")
             overlay_img = gr.Image(label="Semantic Overlay", type="numpy", format="png")
 
+        legend_html = gr.HTML(label="Overlay Legend")
+
         with gr.Row():
             viewer_html = gr.HTML(label="3D Map Viewer")
 
@@ -1088,7 +1294,7 @@ def build_app(
             ssh_options,
             local_viewer_port,
         ]
-        poll_outputs = [input_img, viewer_html, overlay_img, pipeline_status, stream_status, semantic_status]
+        poll_outputs = [input_img, overlay_img, legend_html, viewer_html, pipeline_status, stream_status, semantic_status]
 
         timer = gr.Timer(value=POLL_SEC)
         timer.tick(fn=poll_dashboard, inputs=poll_inputs, outputs=poll_outputs)
