@@ -695,7 +695,7 @@ def matching_rgb(run_dir: Path, anchor_path: str):
     stem = Path(anchor_path).stem
     rgb_dir = run_dir / "rgb"
     for ext in exts:
-        candidate = rgb_dir / f"{stem}{ext}"
+        candidate = rgb_dir / (stem + ext)
         if candidate.is_file():
             return str(candidate)
     return ""
