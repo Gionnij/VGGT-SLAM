@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
 POLL_SEC = 1.0
-_CLASS_NAME_CACHE: Optional[list[str]] = None
+_CLASS_LABEL_CACHE: Optional[list[tuple[int, str]]] = None
 
 _TUNNEL_PROC: Optional[subprocess.Popen[bytes]] = None
 _TUNNEL_SIG: Optional[tuple[str, str, str, str, int, int]] = None
@@ -87,10 +87,10 @@ def _resolve_first_existing_path(candidates: list[Path]) -> Optional[Path]:
     return None
 
 
-def _load_local_label_names() -> list[str]:
-    global _CLASS_NAME_CACHE
-    if _CLASS_NAME_CACHE is not None:
-        return _CLASS_NAME_CACHE
+def _load_local_class_labels() -> list[tuple[int, str]]:
+    global _CLASS_LABEL_CACHE
+    if _CLASS_LABEL_CACHE is not None:
+        return _CLASS_LABEL_CACHE
 
     repo_root = Path(__file__).resolve().parents[1]
     kept_candidates = []
@@ -121,24 +121,27 @@ def _load_local_label_names() -> list[str]:
     kept_path = _resolve_first_existing_path(kept_candidates)
     classes_path = _resolve_first_existing_path(classes_candidates)
     if kept_path is None or classes_path is None:
-        _CLASS_NAME_CACHE = []
-        return _CLASS_NAME_CACHE
+        _CLASS_LABEL_CACHE = []
+        return _CLASS_LABEL_CACHE
 
     try:
         kept_ids = [int(x) for x in _read_nonempty_lines(kept_path)]
         semantic_names = _read_nonempty_lines(classes_path)
     except Exception:
-        _CLASS_NAME_CACHE = []
-        return _CLASS_NAME_CACHE
+        _CLASS_LABEL_CACHE = []
+        return _CLASS_LABEL_CACHE
 
-    names: list[str] = []
-    for global_idx in kept_ids:
+    # Match the dense-id convention used by training/eval:
+    # remap_classes = sorted(set(remap_classes))
+    dense_to_orig = sorted(set(kept_ids))
+    labels: list[tuple[int, str]] = []
+    for global_idx in dense_to_orig:
         if 0 <= global_idx < len(semantic_names):
-            names.append(semantic_names[global_idx])
+            labels.append((global_idx, semantic_names[global_idx]))
         else:
-            names.append(f"class_{global_idx}")
-    _CLASS_NAME_CACHE = names
-    return _CLASS_NAME_CACHE
+            labels.append((global_idx, f"class_{global_idx}"))
+    _CLASS_LABEL_CACHE = labels
+    return _CLASS_LABEL_CACHE
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -556,7 +559,7 @@ def _legend_html(
             "font-size:13px; color:#4b5563;'>Legend unavailable: mask shape is not 2D.</div>"
         )
 
-    class_names = _load_local_label_names()
+    class_labels = _load_local_class_labels()
     uniq, counts = np.unique(arr.reshape(-1), return_counts=True)
     if uniq.size == 0:
         return (
@@ -570,10 +573,18 @@ def _legend_html(
         label_id = int(uniq[idx])
         rgb = _legend_color_rgb(arr, label_id, overlay_img, rgb_img)
         color_hex = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-        name = class_names[label_id] if 0 <= label_id < len(class_names) else f"label {label_id}"
+        if 0 <= label_id < len(class_labels):
+            original_id, name = class_labels[label_id]
+        else:
+            original_id, name = (-1, f"label {label_id}")
+        title = html.escape(
+            f"remapped {label_id}"
+            + (f" -> original {original_id}" if original_id >= 0 else "")
+        )
         chips.append(
             "<div style='display:inline-flex; align-items:center; gap:8px; padding:6px 10px; "
-            "border:1px solid #d0d7de; border-radius:999px; background:#ffffff; white-space:nowrap;'>"
+            "border:1px solid #d0d7de; border-radius:999px; background:#ffffff; white-space:nowrap;' "
+            f"title='{title}'>"
             f"<span style='display:inline-block; width:12px; height:12px; border-radius:3px; "
             f"background:{color_hex}; border:1px solid rgba(0,0,0,0.18);'></span>"
             f"<span style='font-size:12px; line-height:1.2;'>{html.escape(name)}</span>"
