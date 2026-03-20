@@ -66,6 +66,10 @@ def _quote(value: str) -> str:
     return shlex.quote(value)
 
 
+def _shell_join(args: list[str]) -> str:
+    return " ".join(_quote(arg) for arg in args)
+
+
 def _tail(text: str, limit: int = 8000) -> str:
     if len(text) <= limit:
         return text
@@ -1194,6 +1198,154 @@ def stop_pipeline(
     )
 
 
+def start_robot_image_stream(
+    robot_host: str,
+    robot_user: str,
+    robot_ssh_key: str,
+    robot_ssh_options: str,
+    robot_session: str,
+    robot_interface: str,
+    robot_streamer_path: str,
+    robot_stream_port: float,
+    robot_stream_fps: float,
+    robot_hpc_key: str,
+    ssh_host: str,
+    ssh_user: str,
+) -> str:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    cfg = SshConfig(
+        host=robot_host.strip(),
+        user=robot_user.strip(),
+        key_path=robot_ssh_key.strip(),
+        options=robot_ssh_options.strip(),
+    )
+    if not cfg.host:
+        return f"[{now}] robot stream start aborted\nmissing robot ssh host"
+    if not ssh_host.strip() or not ssh_user.strip():
+        return f"[{now}] robot stream start aborted\nmissing HPC head host/user for reverse tunnel"
+
+    session_name = robot_session.strip() or "robot_image_stream"
+    robot_port = max(1, int(robot_stream_port))
+    robot_fps = max(0.1, float(robot_stream_fps))
+    robot_iface = robot_interface.strip() or "eth0"
+    streamer_path = robot_streamer_path.strip() or "~/Workspace/gio_ws/unitree_robot_tcp_streamer.py"
+
+    streamer_cmd = (
+        "bash -lc "
+        + _quote(
+            "set -euo pipefail; "
+            "source ~/venvs/unitree_sdk2/bin/activate; "
+            + _shell_join(
+                [
+                    "python3",
+                    streamer_path,
+                    "--interface",
+                    robot_iface,
+                    "--bind",
+                    "127.0.0.1",
+                    "--port",
+                    str(robot_port),
+                    "--fps",
+                    str(robot_fps),
+                    "--timeout",
+                    "3.0",
+                ]
+            )
+        )
+    )
+
+    tunnel_args = [
+        "ssh",
+        "-N",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+    ]
+    if robot_hpc_key.strip():
+        tunnel_args.extend(["-i", robot_hpc_key.strip()])
+    tunnel_args.extend(
+        [
+            "-R",
+            f"127.0.0.1:{robot_port}:127.0.0.1:{robot_port}",
+            f"{ssh_user.strip()}@{ssh_host.strip()}",
+        ]
+    )
+    tunnel_cmd = "bash -lc " + _quote("set -euo pipefail; " + _shell_join(tunnel_args))
+
+    remote_script = "; ".join(
+        [
+            "set -euo pipefail",
+            "if ! command -v tmux >/dev/null 2>&1; then echo 'tmux not found on robot' >&2; exit 1; fi",
+            f"if tmux has-session -t {_quote(session_name)} 2>/dev/null; then tmux kill-session -t {_quote(session_name)}; fi",
+            f"tmux new-session -d -s {_quote(session_name)} -n streamer { _quote(streamer_cmd) }",
+            f"tmux new-window -t {_quote(session_name)} -n tunnel { _quote(tunnel_cmd) }",
+            f"tmux set-option -t {_quote(session_name)} remain-on-exit on",
+            f"echo session={_quote(session_name)}",
+            "echo windows=streamer,tunnel",
+            f"echo streamer_port={_quote(str(robot_port))}",
+            f"echo hpc_head={_quote(ssh_host.strip())}",
+        ]
+    )
+
+    try:
+        rc, out, err = _run_ssh_bash(cfg, remote_script, timeout_s=120, text=True)
+    except subprocess.TimeoutExpired:
+        return f"[{now}] robot stream start timeout\ntimed out while contacting {cfg.target}"
+    return (
+        f"[{now}] robot stream start "
+        + ("ok" if rc == 0 else f"failed (exit {rc})")
+        + "\n"
+        + f"mode=ssh target={cfg.target}\n"
+        + f"exit_code={rc}\n"
+        + f"stdout:\n{_tail(str(out))}\n"
+        + f"stderr:\n{_tail(str(err))}"
+    )
+
+
+def stop_robot_image_stream(
+    robot_host: str,
+    robot_user: str,
+    robot_ssh_key: str,
+    robot_ssh_options: str,
+    robot_session: str,
+) -> str:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    cfg = SshConfig(
+        host=robot_host.strip(),
+        user=robot_user.strip(),
+        key_path=robot_ssh_key.strip(),
+        options=robot_ssh_options.strip(),
+    )
+    if not cfg.host:
+        return f"[{now}] robot stream stop aborted\nmissing robot ssh host"
+
+    session_name = robot_session.strip() or "robot_image_stream"
+    remote_script = "; ".join(
+        [
+            "set -euo pipefail",
+            f"if tmux has-session -t {_quote(session_name)} 2>/dev/null; then tmux kill-session -t {_quote(session_name)}; echo 'killed'; else echo 'session not found'; fi",
+        ]
+    )
+    try:
+        rc, out, err = _run_ssh_bash(cfg, remote_script, timeout_s=60, text=True)
+    except subprocess.TimeoutExpired:
+        return f"[{now}] robot stream stop timeout\ntimed out while contacting {cfg.target}"
+    return (
+        f"[{now}] robot stream stop "
+        + ("ok" if rc == 0 else f"failed (exit {rc})")
+        + "\n"
+        + f"mode=ssh target={cfg.target}\n"
+        + f"exit_code={rc}\n"
+        + f"stdout:\n{_tail(str(out))}\n"
+        + f"stderr:\n{_tail(str(err))}"
+    )
+
+
 def build_app(
     *,
     bashrc_shared_default: str,
@@ -1205,6 +1357,16 @@ def build_app(
     viewer_port_default: int,
     window_size_default: int,
     existing_job_id_default: str,
+    robot_host_default: str,
+    robot_user_default: str,
+    robot_ssh_key_default: str,
+    robot_ssh_options_default: str,
+    robot_session_default: str,
+    robot_interface_default: str,
+    robot_streamer_path_default: str,
+    robot_stream_port_default: int,
+    robot_stream_fps_default: float,
+    robot_hpc_key_default: str,
     state_file_default: str,
     execution_mode_default: str,
     ssh_host_default: str,
@@ -1241,6 +1403,8 @@ def build_app(
         with gr.Row():
             start_btn = gr.Button("Start Pipeline", variant="primary")
             stop_btn = gr.Button("Stop Pipeline", variant="stop")
+            start_stream_btn = gr.Button("Start Image Stream")
+            stop_stream_btn = gr.Button("Stop Image Stream")
             refresh_btn = gr.Button("Refresh Now")
 
         with gr.Row():
@@ -1249,7 +1413,7 @@ def build_app(
 
         with gr.Row():
             semantic_status = gr.Textbox(label="Semantic Diagnostics", lines=10, interactive=False)
-            action_log = gr.Textbox(label="Start/Stop Command Output", lines=10, interactive=False)
+            action_log = gr.Textbox(label="Command Output", lines=10, interactive=False)
 
         with gr.Accordion("Runtime Configuration", open=True):
             execution_mode = gr.Radio(
@@ -1306,6 +1470,24 @@ def build_app(
                 placeholder="default: ~/.vggt_active_gpu_<session>.env",
             )
 
+            with gr.Row():
+                robot_host = gr.Textbox(label="Robot SSH host", value=robot_host_default)
+                robot_user = gr.Textbox(label="Robot SSH user", value=robot_user_default)
+                robot_ssh_key = gr.Textbox(label="Robot SSH key (optional)", value=robot_ssh_key_default)
+            robot_ssh_options = gr.Textbox(
+                label="Robot SSH options (optional)",
+                value=robot_ssh_options_default,
+                placeholder="-p 22",
+            )
+            with gr.Row():
+                robot_session = gr.Textbox(label="Robot tmux session", value=robot_session_default)
+                robot_interface = gr.Textbox(label="Robot camera interface", value=robot_interface_default)
+                robot_hpc_key = gr.Textbox(label="Robot->HPC SSH key (optional)", value=robot_hpc_key_default)
+            with gr.Row():
+                robot_streamer_path = gr.Textbox(label="Robot TCP streamer path", value=robot_streamer_path_default)
+                robot_stream_port = gr.Number(label="Robot/HPC stream port", value=robot_stream_port_default, precision=0)
+                robot_stream_fps = gr.Number(label="Robot stream FPS", value=robot_stream_fps_default)
+
         poll_inputs = [
             session,
             demo_root,
@@ -1361,6 +1543,35 @@ def build_app(
             ],
             outputs=[pipeline_status, action_log],
         )
+        start_stream_btn.click(
+            fn=start_robot_image_stream,
+            inputs=[
+                robot_host,
+                robot_user,
+                robot_ssh_key,
+                robot_ssh_options,
+                robot_session,
+                robot_interface,
+                robot_streamer_path,
+                robot_stream_port,
+                robot_stream_fps,
+                robot_hpc_key,
+                ssh_host,
+                ssh_user,
+            ],
+            outputs=[action_log],
+        )
+        stop_stream_btn.click(
+            fn=stop_robot_image_stream,
+            inputs=[
+                robot_host,
+                robot_user,
+                robot_ssh_key,
+                robot_ssh_options,
+                robot_session,
+            ],
+            outputs=[action_log],
+        )
 
         demo.load(fn=poll_dashboard, inputs=poll_inputs, outputs=poll_outputs)
 
@@ -1379,6 +1590,8 @@ def parse_args() -> argparse.Namespace:
 
     default_ssh_host = os.getenv("VGGT_DASHBOARD_SSH_HOST", "hpc-head1.ewi.utwente.nl")
     default_ssh_user = os.getenv("VGGT_DASHBOARD_SSH_USER", "s2984792")
+    default_robot_host = os.getenv("VGGT_DASHBOARD_ROBOT_HOST", "192.168.225.122")
+    default_robot_user = os.getenv("VGGT_DASHBOARD_ROBOT_USER", "unitree")
     default_remote_root = os.getenv(
         "VGGT_DASHBOARD_REMOTE_ROOT",
         f"/home/{default_ssh_user}/src/VGGT-SLAM" if default_ssh_user else "~/src/VGGT-SLAM",
@@ -1424,6 +1637,20 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("VGGT_EXISTING_GPU_JOB_ID", os.getenv("HPC_EXISTING_GPU_JOB_ID", "")),
         help="Optional existing RUNNING Slurm job id created via salloc",
     )
+    parser.add_argument("--robot-host", default=default_robot_host, help="Robot SSH host")
+    parser.add_argument("--robot-user", default=default_robot_user, help="Robot SSH username")
+    parser.add_argument("--robot-ssh-key", default=os.getenv("VGGT_DASHBOARD_ROBOT_SSH_KEY", ""), help="Robot SSH key path (optional)")
+    parser.add_argument("--robot-ssh-options", default=os.getenv("VGGT_DASHBOARD_ROBOT_SSH_OPTIONS", ""), help="Extra SSH options for robot SSH")
+    parser.add_argument("--robot-session", default=os.getenv("VGGT_DASHBOARD_ROBOT_SESSION", "robot_image_stream"), help="Robot tmux session name")
+    parser.add_argument("--robot-interface", default=os.getenv("VGGT_DASHBOARD_ROBOT_INTERFACE", "eth0"), help="Robot camera interface")
+    parser.add_argument(
+        "--robot-streamer-path",
+        default=os.getenv("VGGT_DASHBOARD_ROBOT_STREAMER_PATH", "~/Workspace/gio_ws/unitree_robot_tcp_streamer.py"),
+        help="Robot-side TCP streamer path",
+    )
+    parser.add_argument("--robot-stream-port", type=int, default=int(os.getenv("VGGT_DASHBOARD_ROBOT_STREAM_PORT", "15001")), help="Robot/HPC TCP stream port")
+    parser.add_argument("--robot-stream-fps", type=float, default=float(os.getenv("VGGT_DASHBOARD_ROBOT_STREAM_FPS", "2.0")), help="Robot TCP stream FPS")
+    parser.add_argument("--robot-hpc-key", default=os.getenv("VGGT_DASHBOARD_ROBOT_HPC_KEY", ""), help="Private key path on the robot for SSH to the HPC head")
     parser.add_argument("--state-file", default=os.getenv("VGGT_GPU_STATE_FILE", ""), help="State file path")
     return parser.parse_args()
 
@@ -1440,6 +1667,16 @@ def main() -> None:
         viewer_port_default=args.viewer_port,
         window_size_default=args.window_size,
         existing_job_id_default=args.existing_job_id,
+        robot_host_default=args.robot_host,
+        robot_user_default=args.robot_user,
+        robot_ssh_key_default=args.robot_ssh_key,
+        robot_ssh_options_default=args.robot_ssh_options,
+        robot_session_default=args.robot_session,
+        robot_interface_default=args.robot_interface,
+        robot_streamer_path_default=args.robot_streamer_path,
+        robot_stream_port_default=args.robot_stream_port,
+        robot_stream_fps_default=args.robot_stream_fps,
+        robot_hpc_key_default=args.robot_hpc_key,
         state_file_default=args.state_file,
         execution_mode_default=args.execution_mode,
         ssh_host_default=args.ssh_host,
