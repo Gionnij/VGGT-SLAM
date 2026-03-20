@@ -70,6 +70,16 @@ def _shell_join(args: list[str]) -> str:
     return " ".join(_quote(arg) for arg in args)
 
 
+def _shell_path_arg(path: str) -> str:
+    if path == "~":
+        return '"$HOME"'
+    if path.startswith("~/"):
+        return '"$HOME/' + path[2:].replace('"', '\\"') + '"'
+    if path.startswith("$HOME/") or path == "$HOME":
+        return '"' + path.replace('"', '\\"') + '"'
+    return _quote(path)
+
+
 def _tail(text: str, limit: int = 8000) -> str:
     if len(text) <= limit:
         return text
@@ -1235,22 +1245,12 @@ def start_robot_image_stream(
         + _quote(
             "set -euo pipefail; "
             "source ~/venvs/unitree_sdk2/bin/activate; "
-            + _shell_join(
-                [
-                    "python3",
-                    streamer_path,
-                    "--interface",
-                    robot_iface,
-                    "--bind",
-                    "127.0.0.1",
-                    "--port",
-                    str(robot_port),
-                    "--fps",
-                    str(robot_fps),
-                    "--timeout",
-                    "3.0",
-                ]
-            )
+            f"python3 {_shell_path_arg(streamer_path)} "
+            f"--interface {_quote(robot_iface)} "
+            "--bind 127.0.0.1 "
+            f"--port {_quote(str(robot_port))} "
+            f"--fps {_quote(str(robot_fps))} "
+            "--timeout 3.0"
         )
     )
 
