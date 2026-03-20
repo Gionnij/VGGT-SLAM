@@ -1036,6 +1036,7 @@ def start_pipeline(
     raw_dir: str,
     viewer_port: float,
     log_results: bool,
+    existing_job_id: str,
     execution_mode: str,
     ssh_host: str,
     ssh_user: str,
@@ -1071,6 +1072,8 @@ def start_pipeline(
     # script can derive dependent vars from the checkpoint while the UI keeps
     # final control over the launch-critical paths.
     script_lines.extend(base_exports)
+    job_id = existing_job_id.strip()
+    job_arg = f" --job-id {_quote(job_id)}" if job_id else ""
     script_lines.append(
         "start_robot_pipeline_tmux -k --no-attach "
         f"--session {_quote(session.strip())} "
@@ -1078,6 +1081,7 @@ def start_pipeline(
         "--demo-root \"$VGGT_DEMO_ROOT\" "
         "--log-results \"$VGGT_LOG_RESULTS\" "
         "--max-live-steps \"${VGGT_MAX_LIVE_STEPS:-0}\""
+        f"{job_arg}"
     )
     script = "; ".join(script_lines)
 
@@ -1196,6 +1200,7 @@ def build_app(
     demo_root_default: str,
     raw_dir_default: str,
     viewer_port_default: int,
+    existing_job_id_default: str,
     state_file_default: str,
     execution_mode_default: str,
     ssh_host_default: str,
@@ -1271,6 +1276,11 @@ def build_app(
                 value=setup_script_default,
             )
             session = gr.Textbox(label="tmux session", value=session_default)
+            existing_job_id = gr.Textbox(
+                label="Existing Slurm job id (optional)",
+                value=existing_job_id_default,
+                placeholder="Reuse a RUNNING salloc allocation, e.g. 463349",
+            )
             checkpoint = gr.Textbox(label="Checkpoint path", value=checkpoint_default)
             demo_root = gr.Textbox(label="Demo root path", value=demo_root_default)
             raw_dir = gr.Textbox(label="Raw RGB cache directory", value=raw_dir_default)
@@ -1322,6 +1332,7 @@ def build_app(
                 raw_dir,
                 viewer_port,
                 log_results,
+                existing_job_id,
                 execution_mode,
                 ssh_host,
                 ssh_user,
@@ -1401,6 +1412,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--demo-root", default=default_demo, help="Demo root")
     parser.add_argument("--raw-dir", default=default_raw, help="Raw RGB cache directory")
     parser.add_argument("--viewer-port", type=int, default=int(os.getenv("VGGT_VISER_PORT", "8080")), help="Remote Viser port")
+    parser.add_argument(
+        "--existing-job-id",
+        default=os.getenv("VGGT_EXISTING_GPU_JOB_ID", os.getenv("HPC_EXISTING_GPU_JOB_ID", "")),
+        help="Optional existing RUNNING Slurm job id created via salloc",
+    )
     parser.add_argument("--state-file", default=os.getenv("VGGT_GPU_STATE_FILE", ""), help="State file path")
     return parser.parse_args()
 
@@ -1415,6 +1431,7 @@ def main() -> None:
         demo_root_default=args.demo_root,
         raw_dir_default=args.raw_dir,
         viewer_port_default=args.viewer_port,
+        existing_job_id_default=args.existing_job_id,
         state_file_default=args.state_file,
         execution_mode_default=args.execution_mode,
         ssh_host_default=args.ssh_host,

@@ -15,6 +15,7 @@ HEAD_PORT="${HEAD_PORT:-15001}"
 FPS="${FPS:-2.0}"
 ATTACH="1"
 FORCE_KILL="0"
+EXISTING_JOB_ID="${VGGT_EXISTING_GPU_JOB_ID:-${HPC_EXISTING_GPU_JOB_ID:-}}"
 STATE_FILE="${VGGT_GPU_STATE_FILE:-$HOME/.vggt_active_gpu_${SESSION_NAME}.env}"
 RUN_ID="${HPC_GPU_RUN_ID:-${SESSION_NAME}_$(date +%s)_$$}"
 
@@ -153,6 +154,7 @@ Options:
   -f, --fps FPS             bridge publish rate (default: ${FPS})
   -c, --checkpoint PATH     fine-tuned checkpoint for run_pipeline (required)
   -d, --demo-root PATH      demo output root (default: ${DEMO_ROOT})
+      --job-id ID           reuse an existing RUNNING Slurm allocation created via salloc
       --log-results 0|1     enable legacy log_results path (default: ${LOG_RESULTS})
       --max-live-steps N    auto-stop after N submaps (0 = no auto-stop)
       --stop-topic TOPIC    stop topic for ingest (default: ${STOP_TOPIC})
@@ -175,6 +177,8 @@ while [[ $# -gt 0 ]]; do
       CHECKPOINT="$2"; shift 2 ;;
     -d|--demo-root)
       DEMO_ROOT="$2"; shift 2 ;;
+    --job-id)
+      EXISTING_JOB_ID="$2"; shift 2 ;;
     --log-results)
       LOG_RESULTS="$2"; shift 2 ;;
     --max-live-steps)
@@ -202,13 +206,43 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 GPU_ALLOC_PREFIX=""
-if command -v sinteractive >/dev/null 2>&1; then
-  GPU_ALLOC_PREFIX="sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
-elif command -v srun >/dev/null 2>&1; then
-  GPU_ALLOC_PREFIX="srun --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
+GPU_ALLOC_SUMMARY=""
+GPU_ALLOC_LOG=""
+if [[ -n "${EXISTING_JOB_ID}" ]]; then
+  if ! command -v srun >/dev/null 2>&1; then
+    echo "[start_hpc_robot_pipeline_min_tmux] srun not found in PATH; cannot reuse existing job ${EXISTING_JOB_ID}." >&2
+    exit 1
+  fi
+  if ! command -v scontrol >/dev/null 2>&1; then
+    echo "[start_hpc_robot_pipeline_min_tmux] scontrol not found in PATH; cannot validate existing job ${EXISTING_JOB_ID}." >&2
+    exit 1
+  fi
+
+  JOB_INFO="$(scontrol show job "${EXISTING_JOB_ID}" 2>/dev/null || true)"
+  if [[ -z "${JOB_INFO}" ]]; then
+    echo "[start_hpc_robot_pipeline_min_tmux] Existing job ${EXISTING_JOB_ID} not found." >&2
+    exit 1
+  fi
+  JOB_STATE="$(sed -n 's/.*JobState=\([^ ]*\).*/\1/p' <<<"${JOB_INFO}" | head -n 1)"
+  if [[ "${JOB_STATE}" != "RUNNING" ]]; then
+    echo "[start_hpc_robot_pipeline_min_tmux] Existing job ${EXISTING_JOB_ID} is not RUNNING (state=${JOB_STATE:-unknown})." >&2
+    exit 1
+  fi
+
+  GPU_ALLOC_PREFIX="srun --jobid=${EXISTING_JOB_ID} --overlap --nodes=1 --ntasks=1"
+  GPU_ALLOC_SUMMARY="existing Slurm job ${EXISTING_JOB_ID}"
+  GPU_ALLOC_LOG="[gpu-pipeline] attaching to existing GPU allocation job ${EXISTING_JOB_ID}..."
 else
-  echo "[start_hpc_robot_pipeline_min_tmux] Neither sinteractive nor srun found in PATH." >&2
-  exit 1
+  if command -v sinteractive >/dev/null 2>&1; then
+    GPU_ALLOC_PREFIX="sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
+  elif command -v srun >/dev/null 2>&1; then
+    GPU_ALLOC_PREFIX="srun --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
+  else
+    echo "[start_hpc_robot_pipeline_min_tmux] Neither sinteractive nor srun found in PATH." >&2
+    exit 1
+  fi
+  GPU_ALLOC_SUMMARY="fresh allocation"
+  GPU_ALLOC_LOG="[gpu-pipeline] requesting GPU node..."
 fi
 
 if [[ ! -f "${BASHRC_SHARED}" ]]; then
@@ -259,7 +293,7 @@ cat > "${RUN_DIR}/gpu_pipeline.sh" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 source "${BASHRC_SHARED}"
-echo "[gpu-pipeline] requesting GPU node..."
+echo "${GPU_ALLOC_LOG}"
 ${GPU_ALLOC_PREFIX} bash -lc '
   set -euo pipefail
   source "${BASHRC_SHARED}"
@@ -362,6 +396,7 @@ echo "  windows: head-bridge | gpu-pipeline"
 echo "  attach : tmux attach -t ${SESSION_NAME}"
 echo "  checkpoint: ${CHECKPOINT}"
 echo "  demo root : ${DEMO_ROOT}"
+echo "  allocation: ${GPU_ALLOC_SUMMARY}"
 echo "  state file: ${STATE_FILE}"
 echo "  run id   : ${RUN_ID}"
 
