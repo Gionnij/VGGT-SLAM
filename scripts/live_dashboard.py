@@ -1035,6 +1035,7 @@ def start_pipeline(
     demo_root: str,
     raw_dir: str,
     viewer_port: float,
+    window_size: float,
     log_results: bool,
     existing_job_id: str,
     execution_mode: str,
@@ -1050,6 +1051,7 @@ def start_pipeline(
 
     setup_script = setup_script.strip()
     viewer_port_i = int(viewer_port)
+    window_size_i = max(1, int(window_size))
     log_results_i = 1 if log_results else 0
     base_exports = [
         f"export VGGT_FINETUNE_CKPT={_quote(checkpoint.strip())}",
@@ -1059,6 +1061,7 @@ def start_pipeline(
         "export HPC_ROBOT_SAVE_EVERY=1",
         "export VGGT_VIS_MAP=1",
         f"export VGGT_VISER_PORT={_quote(str(viewer_port_i))}",
+        f"export VGGT_WINDOW_SIZE={_quote(str(window_size_i))}",
     ]
 
     script_lines = [
@@ -1200,6 +1203,7 @@ def build_app(
     demo_root_default: str,
     raw_dir_default: str,
     viewer_port_default: int,
+    window_size_default: int,
     existing_job_id_default: str,
     state_file_default: str,
     execution_mode_default: str,
@@ -1287,6 +1291,7 @@ def build_app(
 
             with gr.Row():
                 viewer_port = gr.Number(label="Remote Viser port", value=viewer_port_default, precision=0)
+                window_size = gr.Number(label="VGGT window size", value=window_size_default, precision=0)
                 log_results = gr.Checkbox(label="VGGT log_results", value=False)
                 stop_timeout = gr.Number(label="Stop timeout (s)", value=120, precision=0)
 
@@ -1331,6 +1336,7 @@ def build_app(
                 demo_root,
                 raw_dir,
                 viewer_port,
+                window_size,
                 log_results,
                 existing_job_id,
                 execution_mode,
@@ -1412,6 +1418,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--demo-root", default=default_demo, help="Demo root")
     parser.add_argument("--raw-dir", default=default_raw, help="Raw RGB cache directory")
     parser.add_argument("--viewer-port", type=int, default=int(os.getenv("VGGT_VISER_PORT", "8080")), help="Remote Viser port")
+    parser.add_argument("--window-size", type=int, default=int(os.getenv("VGGT_WINDOW_SIZE", "15")), help="VGGT live window size")
     parser.add_argument(
         "--existing-job-id",
         default=os.getenv("VGGT_EXISTING_GPU_JOB_ID", os.getenv("HPC_EXISTING_GPU_JOB_ID", "")),
@@ -1431,6 +1438,7 @@ def main() -> None:
         demo_root_default=args.demo_root,
         raw_dir_default=args.raw_dir,
         viewer_port_default=args.viewer_port,
+        window_size_default=args.window_size,
         existing_job_id_default=args.existing_job_id,
         state_file_default=args.state_file,
         execution_mode_default=args.execution_mode,
