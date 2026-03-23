@@ -858,7 +858,10 @@ if not p.is_file():
 sys.stdout.buffer.write(p.read_bytes())
 """
     script = "python3 - <<'PY'\n" + py + "\nPY"
-    rc, out, err = _run_ssh_bash(cfg, script, timeout_s, text=False)
+    try:
+        rc, out, err = _run_ssh_bash(cfg, script, timeout_s, text=False)
+    except subprocess.TimeoutExpired:
+        return None, f"ssh read timed out after {timeout_s}s"
     out_b = out if isinstance(out, (bytes, bytearray)) else b""
     err_b = err if isinstance(err, (bytes, bytearray)) else b""
     if rc != 0:
