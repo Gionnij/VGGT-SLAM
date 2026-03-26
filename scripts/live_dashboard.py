@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover - optional runtime dependency
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
 POLL_SEC = 1.0
 _CLASS_LABEL_CACHE: Optional[list[tuple[int, str]]] = None
+_FRAME_META_RE = re.compile(r"seq_(\d+)_ts_([0-9]+(?:\.[0-9]+)?)")
 
 _TUNNEL_PROC: Optional[subprocess.Popen[bytes]] = None
 _TUNNEL_SIG: Optional[tuple[str, str, str, str, int, int]] = None
@@ -620,6 +621,235 @@ def _latest_processed_rgb(demo_root: Path) -> tuple[Optional[np.ndarray], str]:
     return _latest_image_in_dir(run_dir / "rgb")
 
 
+def _frame_meta_from_path(path: str) -> tuple[Optional[int], Optional[float]]:
+    name = Path(path).stem
+    m = _FRAME_META_RE.search(name)
+    if m is None:
+        return None, None
+    try:
+        return int(m.group(1)), float(m.group(2))
+    except Exception:
+        return None, None
+
+
+def _latest_runtime_metrics_path(demo_root: Path) -> str:
+    tap_logs = demo_root.expanduser().parent / "tap_logs"
+    if not tap_logs.is_dir():
+        return ""
+    latest: Optional[Path] = None
+    latest_mtime = -1.0
+    for path in tap_logs.iterdir():
+        if not path.is_file():
+            continue
+        if not path.name.startswith("runtime_metrics_") or path.suffix.lower() != ".jsonl":
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+            latest = path
+    return str(latest) if latest is not None else ""
+
+
+def _runtime_metrics_summary_from_records(records: list[dict]) -> dict[str, float | int | str]:
+    if not records:
+        return {}
+    live_start_idx = 0
+    for idx, record in enumerate(records):
+        if str(record.get("event", "")) == "live_start":
+            live_start_idx = idx
+    run_records = records[live_start_idx:]
+    windows = [rec for rec in run_records if str(rec.get("event", "")) == "window_processed"]
+    if not windows:
+        return {}
+
+    latest_t = float(windows[-1].get("t", 0.0) or 0.0)
+    recent = [
+        rec
+        for rec in windows
+        if latest_t - float(rec.get("t", latest_t) or latest_t) <= 300.0
+    ]
+    if not recent:
+        recent = windows[-min(len(windows), 12) :]
+
+    processed_frames = 0
+    semantic_samples: list[float] = []
+    for rec in recent:
+        window_len = max(1, int(rec.get("window_len", 1) or 1))
+        fallback_frames = max(1, window_len - 1)
+        processed_frames += max(1, int(rec.get("processed_frames", fallback_frames) or fallback_frames))
+        sem_s = rec.get("semantic_inference_s")
+        if sem_s is not None:
+            try:
+                semantic_samples.append(float(sem_s))
+            except Exception:
+                pass
+
+    if len(recent) > 1:
+        elapsed_s = max(
+            float(recent[-1].get("t", 0.0) or 0.0) - float(recent[0].get("t", 0.0) or 0.0),
+            1e-6,
+        )
+    else:
+        elapsed_s = max(float(recent[0].get("window_total_s", 0.0) or 0.0), 1e-6)
+
+    avg_window_s = sum(float(rec.get("window_total_s", 0.0) or 0.0) for rec in recent) / max(1, len(recent))
+    out: dict[str, float | int | str] = {
+        "proc_fps": processed_frames / elapsed_s,
+        "mpm": (60.0 * len(recent)) / elapsed_s,
+        "submaps_total": len(windows),
+        "recent_windows": len(recent),
+        "avg_window_s": avg_window_s,
+    }
+    if semantic_samples:
+        out["avg_semantic_s"] = sum(semantic_samples) / len(semantic_samples)
+    return out
+
+
+def _runtime_metrics_summary_from_file(path: str) -> dict[str, float | int | str]:
+    if not path.strip():
+        return {}
+    metrics_path = Path(path).expanduser()
+    if not metrics_path.is_file():
+        return {}
+    try:
+        lines = metrics_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return {}
+    records: list[dict] = []
+    for raw in lines[-4000:]:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            records.append(obj)
+    out = _runtime_metrics_summary_from_records(records)
+    if out:
+        out["metrics_path"] = str(metrics_path)
+    return out
+
+
+def _metrics_with_overlay_lag(
+    summary: dict[str, float | int | str],
+    overlay_path: str,
+    *,
+    overlay_mtime: Optional[float] = None,
+) -> dict[str, float | int | str]:
+    out = dict(summary)
+    _seq, frame_ts = _frame_meta_from_path(overlay_path)
+    if frame_ts is not None:
+        ref = overlay_mtime
+        if ref is None and overlay_path.strip():
+            try:
+                ref = float(Path(overlay_path).expanduser().stat().st_mtime)
+            except Exception:
+                ref = None
+        if ref is not None:
+            out["overlay_lag_s"] = max(0.0, float(ref) - frame_ts)
+    return out
+
+
+def _metrics_bar_html(summary: dict[str, float | int | str]) -> str:
+    if not summary:
+        return (
+            "<div style='border:1px dashed #d0d7de; border-radius:10px; padding:14px 16px; "
+            "font-size:13px; color:#4b5563;'>Live metrics will appear once runtime metrics are available.</div>"
+        )
+
+    def metric_chip(label: str, value: str) -> str:
+        return (
+            "<div style='display:flex; flex-direction:column; gap:4px; min-width:110px; "
+            "padding:10px 12px; border:1px solid #d0d7de; border-radius:10px; background:#ffffff;'>"
+            f"<div style='font-size:11px; color:#4b5563; text-transform:uppercase; letter-spacing:0.04em;'>{html.escape(label)}</div>"
+            f"<div style='font-size:20px; font-weight:700; line-height:1.1;'>{html.escape(value)}</div>"
+            "</div>"
+        )
+
+    chips = []
+    if "proc_fps" in summary:
+        chips.append(metric_chip("Proc FPS", f"{float(summary['proc_fps']):.2f}"))
+    if "mpm" in summary:
+        chips.append(metric_chip("MPM", f"{float(summary['mpm']):.1f}"))
+    if "submaps_total" in summary:
+        chips.append(metric_chip("Submaps", str(int(summary["submaps_total"]))))
+
+    foot = []
+    if "avg_window_s" in summary:
+        foot.append(f"avg_window={float(summary['avg_window_s']):.2f}s")
+    if "avg_semantic_s" in summary:
+        foot.append(f"avg_semantic={float(summary['avg_semantic_s']):.2f}s")
+    if "recent_windows" in summary:
+        foot.append(f"recent_windows={int(summary['recent_windows'])}")
+
+    return (
+        "<div style='border:1px solid #d0d7de; border-radius:10px; padding:14px 16px; "
+        "display:flex; flex-direction:column; gap:10px;'>"
+        "<div style='font-size:14px; font-weight:600;'>Live Processing Metrics</div>"
+        "<div style='display:flex; gap:10px; flex-wrap:wrap;'>"
+        + "".join(chips)
+        + "</div>"
+        + (
+            "<div style='font-family:monospace; font-size:12px; color:#4b5563;'>"
+            + html.escape(" | ".join(foot))
+            + "</div>"
+            if foot
+            else ""
+        )
+        + "</div>"
+    )
+
+
+def _overlay_with_latency_badge(
+    overlay_img: Optional[np.ndarray],
+    summary: dict[str, float | int | str],
+) -> Optional[np.ndarray]:
+    if overlay_img is None or cv2 is None:
+        return overlay_img
+    lag_s = summary.get("overlay_lag_s")
+    if lag_s is None:
+        return overlay_img
+    try:
+        lag = float(lag_s)
+    except Exception:
+        return overlay_img
+
+    out = overlay_img.copy()
+    h, w = out.shape[:2]
+    label = f"lag {lag:.2f}s"
+    font_scale = max(0.7, min(w, h) / 700.0)
+    thickness = max(2, int(round(font_scale * 2.2)))
+    ((text_w, text_h), baseline) = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+    pad_x = max(12, int(round(font_scale * 12)))
+    pad_y = max(10, int(round(font_scale * 10)))
+    box_w = text_w + 2 * pad_x
+    box_h = text_h + baseline + 2 * pad_y
+    x0, y0 = 12, max(12, h - box_h - 12)
+    x1 = min(w - 12, x0 + box_w)
+    y1 = min(h - 12, y0 + box_h)
+    panel = out.copy()
+    cv2.rectangle(panel, (x0, y0), (x1, y1), (24, 24, 24), thickness=-1)
+    out = cv2.addWeighted(panel, 0.45, out, 0.55, 0.0)
+    text_x = x0 + pad_x
+    text_y = y0 + pad_y + text_h
+    cv2.putText(
+        out,
+        label,
+        (text_x, text_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+    return out
+
+
 def _pipeline_status_text_local(session: str) -> str:
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     has = subprocess.run(
@@ -748,6 +978,89 @@ def tail_text_file(path: Path, max_lines: int):
         return ""
     return "\\n".join(lines[-max(1, max_lines):])
 
+def latest_runtime_metrics_path(root: Path):
+    tap_logs = root.parent / "tap_logs"
+    if not tap_logs.is_dir():
+        return ""
+    best = None
+    best_m = -1.0
+    for f in tap_logs.iterdir():
+        if not f.is_file():
+            continue
+        if not f.name.startswith("runtime_metrics_") or f.suffix.lower() != ".jsonl":
+            continue
+        try:
+            m = f.stat().st_mtime
+        except OSError:
+            continue
+        if m > best_m:
+            best_m = m
+            best = f
+    return str(best) if best is not None else ""
+
+def runtime_metrics_summary(path_str: str):
+    if not path_str:
+        return {{}}
+    path = Path(path_str)
+    if not path.is_file():
+        return {{}}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return {{}}
+    records = []
+    for raw in lines[-4000:]:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            records.append(obj)
+    if not records:
+        return {{"metrics_path": str(path)}}
+    live_start_idx = 0
+    for idx, rec in enumerate(records):
+        if str(rec.get("event", "")) == "live_start":
+            live_start_idx = idx
+    records = records[live_start_idx:]
+    windows = [rec for rec in records if str(rec.get("event", "")) == "window_processed"]
+    if not windows:
+        return {{"metrics_path": str(path)}}
+    latest_t = float(windows[-1].get("t", 0.0) or 0.0)
+    recent = [rec for rec in windows if latest_t - float(rec.get("t", latest_t) or latest_t) <= 300.0]
+    if not recent:
+        recent = windows[-min(len(windows), 12):]
+    processed_frames = 0
+    semantic_values = []
+    for rec in recent:
+        window_len = max(1, int(rec.get("window_len", 1) or 1))
+        fallback_frames = max(1, window_len - 1)
+        processed_frames += max(1, int(rec.get("processed_frames", fallback_frames) or fallback_frames))
+        sem_s = rec.get("semantic_inference_s")
+        if sem_s is not None:
+            try:
+                semantic_values.append(float(sem_s))
+            except Exception:
+                pass
+    if len(recent) > 1:
+        elapsed_s = max(float(recent[-1].get("t", 0.0) or 0.0) - float(recent[0].get("t", 0.0) or 0.0), 1e-6)
+    else:
+        elapsed_s = max(float(recent[0].get("window_total_s", 0.0) or 0.0), 1e-6)
+    summary = {{
+        "metrics_path": str(path),
+        "proc_fps": processed_frames / elapsed_s,
+        "mpm": (60.0 * len(recent)) / elapsed_s,
+        "submaps_total": len(windows),
+        "recent_windows": len(recent),
+        "avg_window_s": sum(float(rec.get("window_total_s", 0.0) or 0.0) for rec in recent) / max(1, len(recent)),
+    }}
+    if semantic_values:
+        summary["avg_semantic_s"] = sum(semantic_values) / len(semantic_values)
+    return summary
+
 now = time.strftime("%Y-%m-%d %H:%M:%S")
 status = f"[{{now}}] stopped (tmux session '{{session}}' not found)"
 tmux_has = subprocess.run(["tmux", "has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -782,11 +1095,19 @@ input_path = latest_image(raw_dir)
 if not input_path and run_dir is not None:
     input_path = latest_image(run_dir / "rgb")
 overlay_path = ""
+overlay_mtime = None
 mask_path = ""
 legend_rgb_path = ""
 log_path = ""
+metrics_path = latest_runtime_metrics_path(demo_root)
+metrics_summary = runtime_metrics_summary(metrics_path)
 if run_dir is not None:
     overlay_path = latest_image(run_dir / "segmentation_overlays")
+    if overlay_path:
+        try:
+            overlay_mtime = Path(overlay_path).stat().st_mtime
+        except Exception:
+            overlay_mtime = None
     mask_path = latest_image(run_dir / "segmentation_masks")
     legend_anchor = mask_path or overlay_path
     if legend_anchor:
@@ -803,10 +1124,13 @@ payload = {{
     "run_dir": str(run_dir) if run_dir is not None else "",
     "input_path": input_path,
     "overlay_path": overlay_path,
+    "overlay_mtime": overlay_mtime,
     "mask_path": mask_path,
     "legend_rgb_path": legend_rgb_path,
     "log_path": log_path,
     "gpu_recent": gpu_recent,
+    "metrics_path": metrics_path,
+    "metrics_summary": metrics_summary,
 }}
 print(json.dumps(payload))
 """
@@ -820,10 +1144,13 @@ print(json.dumps(payload))
             "error": _tail(err_s, 1200),
             "input_path": "",
             "overlay_path": "",
+            "overlay_mtime": None,
             "mask_path": "",
             "legend_rgb_path": "",
             "log_path": "",
             "gpu_recent": "",
+            "metrics_path": "",
+            "metrics_summary": {},
             "gpu_ip": "",
             "state_file": state_file,
             "run_dir": "",
@@ -835,10 +1162,13 @@ print(json.dumps(payload))
             "error": _tail(out_s + "\n" + err_s, 1200),
             "input_path": "",
             "overlay_path": "",
+            "overlay_mtime": None,
             "mask_path": "",
             "legend_rgb_path": "",
             "log_path": "",
             "gpu_recent": "",
+            "metrics_path": "",
+            "metrics_summary": {},
             "gpu_ip": "",
             "state_file": state_file,
             "run_dir": "",
@@ -902,7 +1232,7 @@ def poll_dashboard(
     ssh_key: str,
     ssh_options: str,
     local_viewer_port: float,
-) -> tuple[Optional[np.ndarray], Optional[np.ndarray], str, str, str, str, str]:
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray], str, str, str, str, str, str]:
     mode = execution_mode.strip().lower()
     vp = int(viewer_port)
     local_vp = int(local_viewer_port)
@@ -989,6 +1319,19 @@ def poll_dashboard(
         )
         if extra_err:
             stream_status += f"\nprobe_error={extra_err}"
+        metrics_summary = probe.get("metrics_summary", {})
+        if not isinstance(metrics_summary, dict):
+            metrics_summary = {}
+        metrics_summary = _metrics_with_overlay_lag(
+            metrics_summary,
+            str(probe.get("overlay_path", "")).strip(),
+            overlay_mtime=(
+                float(probe.get("overlay_mtime"))
+                if probe.get("overlay_mtime") is not None
+                else None
+            ),
+        )
+        overlay_img = _overlay_with_latency_badge(overlay_img, metrics_summary)
         semantic_status = _mask_summary(
             mask=mask_img,
             mask_path=str(probe.get("mask_path", "")).strip(),
@@ -996,7 +1339,8 @@ def poll_dashboard(
             gpu_recent=str(probe.get("gpu_recent", "")),
         )
         legend_html = _legend_html(mask=mask_img, overlay_img=overlay_img, rgb_img=legend_rgb_img)
-        return input_img, overlay_img, legend_html, viewer_panel, status, stream_status, semantic_status
+        metrics_html = _metrics_bar_html(metrics_summary)
+        return input_img, overlay_img, legend_html, viewer_panel, metrics_html, status, stream_status, semantic_status
 
     _stop_tunnel()
     demo_root_path = Path(demo_root).expanduser()
@@ -1027,6 +1371,9 @@ def poll_dashboard(
         if log_candidate.is_file():
             log_path = str(log_candidate)
     gpu_recent = _tail_text_file(Path(log_path), max_lines=120) if log_path else _capture_tmux_pane(session, "gpu-pipeline", lines=120)
+    metrics_summary = _runtime_metrics_summary_from_file(_latest_runtime_metrics_path(demo_root_path))
+    metrics_summary = _metrics_with_overlay_lag(metrics_summary, overlay_src)
+    overlay_img = _overlay_with_latency_badge(overlay_img, metrics_summary)
 
     url, source = _viewer_url_local(
         session=session,
@@ -1041,7 +1388,8 @@ def poll_dashboard(
     )
     semantic_status = _mask_summary(mask=mask_img, mask_path=mask_src, overlay_path=overlay_src, gpu_recent=gpu_recent)
     legend_html = _legend_html(mask=mask_img, overlay_img=overlay_img, rgb_img=legend_rgb_img)
-    return input_img, overlay_img, legend_html, _viewer_html(url), status, stream_status, semantic_status
+    metrics_html = _metrics_bar_html(metrics_summary)
+    return input_img, overlay_img, legend_html, _viewer_html(url), metrics_html, status, stream_status, semantic_status
 
 
 def start_pipeline(
@@ -1055,6 +1403,7 @@ def start_pipeline(
     window_size: float,
     log_results: bool,
     existing_job_id: str,
+    slurm_reservation: str,
     execution_mode: str,
     ssh_host: str,
     ssh_user: str,
@@ -1094,6 +1443,8 @@ def start_pipeline(
     script_lines.extend(base_exports)
     job_id = existing_job_id.strip()
     job_arg = f" --job-id {_quote(job_id)}" if job_id else ""
+    reservation = slurm_reservation.strip()
+    reservation_arg = f" --reservation {_quote(reservation)}" if reservation and not job_id else ""
     script_lines.append(
         "start_robot_pipeline_tmux -k --no-attach "
         f"--session {_quote(session.strip())} "
@@ -1101,7 +1452,7 @@ def start_pipeline(
         "--demo-root \"$VGGT_DEMO_ROOT\" "
         "--log-results \"$VGGT_LOG_RESULTS\" "
         "--max-live-steps \"${VGGT_MAX_LIVE_STEPS:-0}\""
-        f"{job_arg}"
+        f"{job_arg}{reservation_arg}"
     )
     script = "; ".join(script_lines)
 
@@ -1362,6 +1713,7 @@ def build_app(
     viewer_port_default: int,
     window_size_default: int,
     existing_job_id_default: str,
+    slurm_reservation_default: str,
     robot_host_default: str,
     robot_user_default: str,
     robot_ssh_key_default: str,
@@ -1403,7 +1755,10 @@ def build_app(
         legend_html = gr.HTML(label="Overlay Legend")
 
         with gr.Row():
-            viewer_html = gr.HTML(label="3D Map Viewer")
+            with gr.Column(scale=1):
+                viewer_html = gr.HTML(label="3D Map Viewer")
+            with gr.Column(scale=1):
+                metrics_html = gr.HTML(label="Live Metrics")
 
         with gr.Row():
             start_btn = gr.Button("Start Pipeline", variant="primary")
@@ -1453,6 +1808,11 @@ def build_app(
                 label="Existing Slurm job id (optional)",
                 value=existing_job_id_default,
                 placeholder="Reuse a RUNNING salloc allocation, e.g. 463349",
+            )
+            slurm_reservation = gr.Textbox(
+                label="Slurm reservation (optional)",
+                value=slurm_reservation_default,
+                placeholder="e.g. s2984792_230",
             )
             checkpoint = gr.Textbox(label="Checkpoint path", value=checkpoint_default)
             demo_root = gr.Textbox(label="Demo root path", value=demo_root_default)
@@ -1507,7 +1867,7 @@ def build_app(
             ssh_options,
             local_viewer_port,
         ]
-        poll_outputs = [input_img, overlay_img, legend_html, viewer_html, pipeline_status, stream_status, semantic_status]
+        poll_outputs = [input_img, overlay_img, legend_html, viewer_html, metrics_html, pipeline_status, stream_status, semantic_status]
 
         timer = gr.Timer(value=POLL_SEC)
         timer.tick(fn=poll_dashboard, inputs=poll_inputs, outputs=poll_outputs)
@@ -1526,6 +1886,7 @@ def build_app(
                 window_size,
                 log_results,
                 existing_job_id,
+                slurm_reservation,
                 execution_mode,
                 ssh_host,
                 ssh_user,
@@ -1642,6 +2003,11 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("VGGT_EXISTING_GPU_JOB_ID", os.getenv("HPC_EXISTING_GPU_JOB_ID", "")),
         help="Optional existing RUNNING Slurm job id created via salloc",
     )
+    parser.add_argument(
+        "--reservation",
+        default=os.getenv("VGGT_SLURM_RESERVATION", os.getenv("HPC_SLURM_RESERVATION", "")),
+        help="Optional Slurm reservation name for fresh allocations",
+    )
     parser.add_argument("--robot-host", default=default_robot_host, help="Robot SSH host")
     parser.add_argument("--robot-user", default=default_robot_user, help="Robot SSH username")
     parser.add_argument("--robot-ssh-key", default=os.getenv("VGGT_DASHBOARD_ROBOT_SSH_KEY", ""), help="Robot SSH key path (optional)")
@@ -1654,7 +2020,7 @@ def parse_args() -> argparse.Namespace:
         help="Robot-side TCP streamer path",
     )
     parser.add_argument("--robot-stream-port", type=int, default=int(os.getenv("VGGT_DASHBOARD_ROBOT_STREAM_PORT", "15001")), help="Robot/HPC TCP stream port")
-    parser.add_argument("--robot-stream-fps", type=float, default=float(os.getenv("VGGT_DASHBOARD_ROBOT_STREAM_FPS", "2.0")), help="Robot TCP stream FPS")
+    parser.add_argument("--robot-stream-fps", type=float, default=float(os.getenv("VGGT_DASHBOARD_ROBOT_STREAM_FPS", "1.0")), help="Robot TCP stream FPS")
     parser.add_argument("--robot-hpc-key", default=os.getenv("VGGT_DASHBOARD_ROBOT_HPC_KEY", ""), help="Private key path on the robot for SSH to the HPC head")
     parser.add_argument("--state-file", default=os.getenv("VGGT_GPU_STATE_FILE", ""), help="State file path")
     return parser.parse_args()
@@ -1672,6 +2038,7 @@ def main() -> None:
         viewer_port_default=args.viewer_port,
         window_size_default=args.window_size,
         existing_job_id_default=args.existing_job_id,
+        slurm_reservation_default=args.reservation,
         robot_host_default=args.robot_host,
         robot_user_default=args.robot_user,
         robot_ssh_key_default=args.robot_ssh_key,

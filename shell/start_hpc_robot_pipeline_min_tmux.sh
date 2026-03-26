@@ -16,6 +16,7 @@ FPS="${FPS:-2.0}"
 ATTACH="1"
 FORCE_KILL="0"
 EXISTING_JOB_ID="${VGGT_EXISTING_GPU_JOB_ID:-${HPC_EXISTING_GPU_JOB_ID:-}}"
+SLURM_RESERVATION="${VGGT_SLURM_RESERVATION:-${HPC_SLURM_RESERVATION:-}}"
 STATE_FILE="${VGGT_GPU_STATE_FILE:-$HOME/.vggt_active_gpu_${SESSION_NAME}.env}"
 RUN_ID="${HPC_GPU_RUN_ID:-${SESSION_NAME}_$(date +%s)_$$}"
 
@@ -155,6 +156,7 @@ Options:
   -c, --checkpoint PATH     fine-tuned checkpoint for run_pipeline (required)
   -d, --demo-root PATH      demo output root (default: ${DEMO_ROOT})
       --job-id ID           reuse an existing RUNNING Slurm allocation created via salloc
+      --reservation NAME    Slurm reservation for fresh allocation, e.g. s2984792_230
       --log-results 0|1     enable legacy log_results path (default: ${LOG_RESULTS})
       --max-live-steps N    auto-stop after N submaps (0 = no auto-stop)
       --stop-topic TOPIC    stop topic for ingest (default: ${STOP_TOPIC})
@@ -179,6 +181,8 @@ while [[ $# -gt 0 ]]; do
       DEMO_ROOT="$2"; shift 2 ;;
     --job-id)
       EXISTING_JOB_ID="$2"; shift 2 ;;
+    --reservation)
+      SLURM_RESERVATION="$2"; shift 2 ;;
     --log-results)
       LOG_RESULTS="$2"; shift 2 ;;
     --max-live-steps)
@@ -209,6 +213,9 @@ GPU_ALLOC_PREFIX=""
 GPU_ALLOC_SUMMARY=""
 GPU_ALLOC_LOG=""
 if [[ -n "${EXISTING_JOB_ID}" ]]; then
+  if [[ -n "${SLURM_RESERVATION}" ]]; then
+    echo "[start_hpc_robot_pipeline_min_tmux][WARN] Ignoring --reservation because --job-id reuses an existing allocation." >&2
+  fi
   if ! command -v srun >/dev/null 2>&1; then
     echo "[start_hpc_robot_pipeline_min_tmux] srun not found in PATH; cannot reuse existing job ${EXISTING_JOB_ID}." >&2
     exit 1
@@ -233,15 +240,19 @@ if [[ -n "${EXISTING_JOB_ID}" ]]; then
   GPU_ALLOC_SUMMARY="existing Slurm job ${EXISTING_JOB_ID}"
   GPU_ALLOC_LOG="[gpu-pipeline] attaching to existing GPU allocation job ${EXISTING_JOB_ID}..."
 else
+  RESERVATION_ARG=""
+  if [[ -n "${SLURM_RESERVATION}" ]]; then
+    RESERVATION_ARG=" --reservation=${SLURM_RESERVATION}"
+  fi
   if command -v sinteractive >/dev/null 2>&1; then
-    GPU_ALLOC_PREFIX="sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
+    GPU_ALLOC_PREFIX="sinteractive --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00${RESERVATION_ARG}"
   elif command -v srun >/dev/null 2>&1; then
-    GPU_ALLOC_PREFIX="srun --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00"
+    GPU_ALLOC_PREFIX="srun --partition=main --gres=gpu:ampere:1 --mem=40G --time=24:00:00${RESERVATION_ARG}"
   else
     echo "[start_hpc_robot_pipeline_min_tmux] Neither sinteractive nor srun found in PATH." >&2
     exit 1
   fi
-  GPU_ALLOC_SUMMARY="fresh allocation"
+  GPU_ALLOC_SUMMARY="fresh allocation${SLURM_RESERVATION:+ (reservation ${SLURM_RESERVATION})}"
   GPU_ALLOC_LOG="[gpu-pipeline] requesting GPU node..."
 fi
 
